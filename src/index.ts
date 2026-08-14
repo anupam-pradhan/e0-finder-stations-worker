@@ -85,34 +85,6 @@ async function searchStations(data: UnknownMap, env: Env): Promise<UnknownMap> {
   const maxResults = Math.trunc(
     finiteNumber(data.maxResults ?? 20, "result count", 1, 20),
   );
-  if (hasGooglePlacesKey(env)) {
-    try {
-      const response = await placesRequest(
-        "places:searchNearby",
-        {
-          method: "POST",
-          body: JSON.stringify({
-            includedTypes: ["gas_station"],
-            maxResultCount: maxResults,
-            rankPreference: "DISTANCE",
-            locationRestriction: {
-              circle: {
-                center: {latitude, longitude},
-                radius: radiusMeters,
-              },
-            },
-          }),
-        },
-        env,
-        richPlaceFields,
-        basePlaceFields,
-      );
-      return {stations: sanitizeStations(response.places)};
-    } catch (error) {
-      if (!shouldUseOsmFallback(error)) throw error;
-      console.warn("Google Places unavailable; using OpenStreetMap nearby fallback");
-    }
-  }
   return overpassNearbyStations(latitude, longitude, radiusMeters, maxResults);
 }
 
@@ -135,39 +107,6 @@ async function searchStationsText(
     data.longitude === undefined
       ? null
       : finiteNumber(data.longitude, "longitude", -180, 180);
-  if (hasGooglePlacesKey(env)) {
-    try {
-      const response = await placesRequest(
-        "places:searchText",
-        {
-          method: "POST",
-          body: JSON.stringify({
-            textQuery: query,
-            includedType: "gas_station",
-            strictTypeFiltering: true,
-            maxResultCount: maxResults,
-            ...(latitude !== null && longitude !== null
-              ? {
-                  locationBias: {
-                    circle: {
-                      center: {latitude, longitude},
-                      radius: 25000,
-                    },
-                  },
-                }
-              : {}),
-          }),
-        },
-        env,
-        richPlaceFields,
-        basePlaceFields,
-      );
-      return {stations: sanitizeStations(response.places)};
-    } catch (error) {
-      if (!shouldUseOsmFallback(error)) throw error;
-      console.warn("Google Places unavailable; using OpenStreetMap text fallback");
-    }
-  }
   return overpassTextStations(query, latitude, longitude, maxResults);
 }
 
@@ -178,34 +117,12 @@ async function getStationDetails(
   const rawPlaceId = typeof data.placeId === "string" ? data.placeId : "";
   const osmId = parseOsmPlaceId(rawPlaceId);
   if (osmId) return overpassStationDetails(osmId);
-  const placeId = validPlaceId(rawPlaceId);
-  if (!hasGooglePlacesKey(env)) return {station: null};
-  const response = await placesRequest(
-    "places/" + encodeURIComponent(placeId),
-    {method: "GET"},
-    env,
-    richDetailFields,
-    baseDetailFields,
-  );
-  return {station: sanitizePlace(response)};
+  validPlaceId(rawPlaceId);
+  return {station: null};
 }
 
-async function getPlacePhoto(data: UnknownMap, env: Env): Promise<UnknownMap> {
-  if (!hasGooglePlacesKey(env)) return {photoUri: null};
-  const name =
-    typeof data.photoResourceName === "string" ? data.photoResourceName : "";
-  if (!/^places\/[A-Za-z0-9_-]+\/photos\/[A-Za-z0-9_-]+$/.test(name)) {
-    throw new PublicError(400, "Invalid photo resource.");
-  }
-  const maxWidthPx = Math.trunc(
-    finiteNumber(data.maxWidthPx ?? 1600, "photo width", 320, 2400),
-  );
-  const response = await placesRequest(
-    name + "/media?skipHttpRedirect=true&maxWidthPx=" + maxWidthPx,
-    {method: "GET"},
-    env,
-  );
-  return {photoUri: typeof response.photoUri === "string" ? response.photoUri : null};
+async function getPlacePhoto(_data: UnknownMap, _env: Env): Promise<UnknownMap> {
+  return {photoUri: null};
 }
 
 async function overpassNearbyStations(
@@ -376,15 +293,6 @@ function parseOsmPlaceId(value: string): OsmPlaceId | null {
   return {type: match[1] as OsmPlaceId["type"], id: Number(match[2])};
 }
 
-function hasGooglePlacesKey(env: Env): boolean {
-  return Boolean(env.GOOGLE_PLACES_API_KEY?.trim());
-}
-
-function shouldUseOsmFallback(error: unknown): boolean {
-  if (!(error instanceof PublicError)) return false;
-  const details = objectValue(error.details);
-  return details.googleStatus === 403 || details.googleStatus === 503;
-}
 async function placesRequest(
   path: string,
   init: RequestInit,
