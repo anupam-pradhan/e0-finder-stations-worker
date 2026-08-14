@@ -5,7 +5,7 @@ export interface Env {
 
 type UnknownMap = Record<string, unknown>;
 
-const placeFields = [
+const richPlaceFields = [
   "places.id",
   "places.displayName",
   "places.formattedAddress",
@@ -21,6 +21,18 @@ const placeFields = [
   "places.photos",
 ].join(",");
 
+const basePlaceFields = [
+  "places.id",
+  "places.displayName",
+  "places.formattedAddress",
+  "places.location",
+  "places.googleMapsUri",
+  "places.primaryType",
+  "places.photos",
+].join(",");
+
+const richDetailFields = richPlaceFields.replaceAll("places.", "");
+const baseDetailFields = basePlaceFields.replaceAll("places.", "");
 const placeIdPattern = /^[A-Za-z0-9_-]{10,256}$/;
 
 export default {
@@ -96,7 +108,8 @@ async function searchStations(data: UnknownMap, env: Env): Promise<UnknownMap> {
       }),
     },
     env,
-    placeFields,
+    richPlaceFields,
+    basePlaceFields,
   );
   return {stations: sanitizeStations(response.places)};
 }
@@ -142,7 +155,8 @@ async function searchStationsText(
       }),
     },
     env,
-    placeFields,
+    richPlaceFields,
+    basePlaceFields,
   );
   return {stations: sanitizeStations(response.places)};
 }
@@ -156,7 +170,8 @@ async function getStationDetails(
     "places/" + encodeURIComponent(placeId),
     {method: "GET"},
     env,
-    placeFields.replaceAll("places.", ""),
+    richDetailFields,
+    baseDetailFields,
   );
   return {station: sanitizePlace(response)};
 }
@@ -183,7 +198,32 @@ async function placesRequest(
   init: RequestInit,
   env: Env,
   fieldMask?: string,
+  fallbackFieldMask?: string,
 ): Promise<UnknownMap> {
+  const firstResult = await placesFetch(path, init, env, fieldMask);
+  if (firstResult.ok) return firstResult.body;
+
+  if (
+    fallbackFieldMask &&
+    fieldMask !== fallbackFieldMask &&
+    firstResult.status === 403 &&
+    isPermissionDenied(firstResult.googleError)
+  ) {
+    console.warn("Places rich fields denied; retrying with base fields", firstResult.googleError);
+    const fallbackResult = await placesFetch(path, init, env, fallbackFieldMask);
+    if (fallbackResult.ok) return fallbackResult.body;
+    throwPlacesError(fallbackResult.status, fallbackResult.googleError);
+  }
+
+  throwPlacesError(firstResult.status, firstResult.googleError);
+}
+
+async function placesFetch(
+  path: string,
+  init: RequestInit,
+  env: Env,
+  fieldMask?: string,
+): Promise<{ok: true; body: UnknownMap} | {ok: false; status: number; googleError: UnknownMap}> {
   const headers = new Headers(init.headers);
   headers.set("Content-Type", "application/json");
   headers.set("X-Goog-Api-Key", env.GOOGLE_PLACES_API_KEY);
@@ -197,7 +237,7 @@ async function placesRequest(
       ...init,
       headers,
     });
-    if (response.ok) return objectValue(await response.json());
+    if (response.ok) return {ok: true, body: objectValue(await response.json())};
     lastStatus = response.status;
     lastBody = await response.text();
     const retryable = response.status === 429 || response.status >= 500;
@@ -206,11 +246,19 @@ async function placesRequest(
   }
   const googleError = parseGoogleError(lastBody);
   console.error("Places request failed", lastStatus, googleError);
+  return {ok: false, status: lastStatus, googleError};
+}
+
+function throwPlacesError(status: number, googleError: UnknownMap): never {
   throw new PublicError(
-    lastStatus === 429 ? 429 : 503,
-    placesErrorMessage(lastStatus),
-    {googleStatus: lastStatus, googleError},
+    status === 429 ? 429 : 503,
+    placesErrorMessage(status),
+    {googleStatus: status, googleError},
   );
+}
+
+function isPermissionDenied(error: UnknownMap): boolean {
+  return error.status === "PERMISSION_DENIED";
 }
 
 function sanitizeStations(value: unknown): UnknownMap[] {
@@ -431,3 +479,4 @@ class PublicError extends Error {
     super(message);
   }
 }
+
