@@ -206,7 +206,7 @@ async function placesRequest(
   console.error("Places request failed", lastStatus, lastBody);
   throw new PublicError(
     lastStatus === 429 ? 429 : 503,
-    "Google station data is temporarily unavailable.",
+    placesErrorMessage(lastStatus),
   );
 }
 
@@ -288,6 +288,18 @@ function sanitizePlace(value: unknown): UnknownMap | null {
   };
 }
 
+function placesErrorMessage(status: number): string {
+  if (status === 400) {
+    return "Google Places rejected the station request. Check Places API setup.";
+  }
+  if (status === 403) {
+    return "Google Places access is blocked. Check API key restrictions, billing, and Places API (New).";
+  }
+  if (status === 429) {
+    return "Google Places quota is exhausted. Check quota and billing.";
+  }
+  return "Google station data is temporarily unavailable. Places status: " + status + ".";
+}
 function parseFuelOptions(value: unknown): {
   fuelTypes: string[];
   fuelPriceType: string | null;
