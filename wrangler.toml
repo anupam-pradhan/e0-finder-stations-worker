@@ -1,0 +1,9 @@
+name = "e0-finder-stations"
+main = "src/index.ts"
+compatibility_date = "2026-08-14"
+
+[vars]
+ALLOWED_ORIGIN = "*"
+
+# Set the Google Places key as a secret, never in this file:
+#   npx wrangler secret put GOOGLE_PLACES_API_KEY
