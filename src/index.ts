@@ -345,14 +345,30 @@ function parseGoogleError(body: string): UnknownMap {
     const parsed = objectValue(JSON.parse(body));
     const error = objectValue(parsed.error);
     const message = typeof error.message === "string" ? error.message.slice(0, 500) : "";
+    const details = Array.isArray(error.details)
+      ? error.details.map((item) => sanitizeGoogleErrorDetail(item))
+      : [];
     return {
       code: typeof error.code === "number" ? error.code : null,
       status: typeof error.status === "string" ? error.status : null,
       message: message || null,
+      details,
     };
   } catch {
     return {message: body.slice(0, 500) || null};
   }
+}
+
+function sanitizeGoogleErrorDetail(value: unknown): UnknownMap {
+  const detail = objectValue(value);
+  const metadata = objectValue(detail.metadata);
+  return {
+    type: typeof detail["@type"] === "string" ? detail["@type"] : null,
+    reason: typeof detail.reason === "string" ? detail.reason : null,
+    domain: typeof detail.domain === "string" ? detail.domain : null,
+    service: typeof metadata.service === "string" ? metadata.service : null,
+    consumer: typeof metadata.consumer === "string" ? metadata.consumer : null,
+  };
 }
 
 function placesErrorMessage(status: number): string {
@@ -480,6 +496,7 @@ class PublicError extends Error {
     super(message);
   }
 }
+
 
 
 
