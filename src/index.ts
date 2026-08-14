@@ -1,5 +1,5 @@
 export interface Env {
-  GOOGLE_PLACES_API_KEY: string;
+  GOOGLE_PLACES_API_KEY?: string;
   ALLOWED_ORIGIN?: string;
 }
 
@@ -45,9 +45,6 @@ export default {
         return json({error: "Use POST."}, 405, cors);
       }
 
-      if (!env.GOOGLE_PLACES_API_KEY?.trim()) {
-        return json({error: "Station backend is not configured."}, 503, cors);
-      }
 
       const data = await readJson(request);
       if (url.pathname === "/searchStations") {
@@ -88,27 +85,35 @@ async function searchStations(data: UnknownMap, env: Env): Promise<UnknownMap> {
   const maxResults = Math.trunc(
     finiteNumber(data.maxResults ?? 20, "result count", 1, 20),
   );
-  const response = await placesRequest(
-    "places:searchNearby",
-    {
-      method: "POST",
-      body: JSON.stringify({
-        includedTypes: ["gas_station"],
-        maxResultCount: maxResults,
-        rankPreference: "DISTANCE",
-        locationRestriction: {
-          circle: {
-            center: {latitude, longitude},
-            radius: radiusMeters,
-          },
+  if (hasGooglePlacesKey(env)) {
+    try {
+      const response = await placesRequest(
+        "places:searchNearby",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            includedTypes: ["gas_station"],
+            maxResultCount: maxResults,
+            rankPreference: "DISTANCE",
+            locationRestriction: {
+              circle: {
+                center: {latitude, longitude},
+                radius: radiusMeters,
+              },
+            },
+          }),
         },
-      }),
-    },
-    env,
-    richPlaceFields,
-    basePlaceFields,
-  );
-  return {stations: sanitizeStations(response.places)};
+        env,
+        richPlaceFields,
+        basePlaceFields,
+      );
+      return {stations: sanitizeStations(response.places)};
+    } catch (error) {
+      if (!shouldUseOsmFallback(error)) throw error;
+      console.warn("Google Places unavailable; using OpenStreetMap nearby fallback");
+    }
+  }
+  return overpassNearbyStations(latitude, longitude, radiusMeters, maxResults);
 }
 
 async function searchStationsText(
@@ -130,39 +135,51 @@ async function searchStationsText(
     data.longitude === undefined
       ? null
       : finiteNumber(data.longitude, "longitude", -180, 180);
-  const response = await placesRequest(
-    "places:searchText",
-    {
-      method: "POST",
-      body: JSON.stringify({
-        textQuery: query,
-        includedType: "gas_station",
-        strictTypeFiltering: true,
-        maxResultCount: maxResults,
-        ...(latitude !== null && longitude !== null
-          ? {
-              locationBias: {
-                circle: {
-                  center: {latitude, longitude},
-                  radius: 25000,
-                },
-              },
-            }
-          : {}),
-      }),
-    },
-    env,
-    richPlaceFields,
-    basePlaceFields,
-  );
-  return {stations: sanitizeStations(response.places)};
+  if (hasGooglePlacesKey(env)) {
+    try {
+      const response = await placesRequest(
+        "places:searchText",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            textQuery: query,
+            includedType: "gas_station",
+            strictTypeFiltering: true,
+            maxResultCount: maxResults,
+            ...(latitude !== null && longitude !== null
+              ? {
+                  locationBias: {
+                    circle: {
+                      center: {latitude, longitude},
+                      radius: 25000,
+                    },
+                  },
+                }
+              : {}),
+          }),
+        },
+        env,
+        richPlaceFields,
+        basePlaceFields,
+      );
+      return {stations: sanitizeStations(response.places)};
+    } catch (error) {
+      if (!shouldUseOsmFallback(error)) throw error;
+      console.warn("Google Places unavailable; using OpenStreetMap text fallback");
+    }
+  }
+  return overpassTextStations(query, latitude, longitude, maxResults);
 }
 
 async function getStationDetails(
   data: UnknownMap,
   env: Env,
 ): Promise<UnknownMap> {
-  const placeId = validPlaceId(data.placeId);
+  const rawPlaceId = typeof data.placeId === "string" ? data.placeId : "";
+  const osmId = parseOsmPlaceId(rawPlaceId);
+  if (osmId) return overpassStationDetails(osmId);
+  const placeId = validPlaceId(rawPlaceId);
+  if (!hasGooglePlacesKey(env)) return {station: null};
   const response = await placesRequest(
     "places/" + encodeURIComponent(placeId),
     {method: "GET"},
@@ -174,6 +191,7 @@ async function getStationDetails(
 }
 
 async function getPlacePhoto(data: UnknownMap, env: Env): Promise<UnknownMap> {
+  if (!hasGooglePlacesKey(env)) return {photoUri: null};
   const name =
     typeof data.photoResourceName === "string" ? data.photoResourceName : "";
   if (!/^places\/[A-Za-z0-9_-]+\/photos\/[A-Za-z0-9_-]+$/.test(name)) {
@@ -190,6 +208,183 @@ async function getPlacePhoto(data: UnknownMap, env: Env): Promise<UnknownMap> {
   return {photoUri: typeof response.photoUri === "string" ? response.photoUri : null};
 }
 
+async function overpassNearbyStations(
+  latitude: number,
+  longitude: number,
+  radiusMeters: number,
+  maxResults: number,
+): Promise<UnknownMap> {
+  const radius = Math.min(Math.trunc(radiusMeters), 50000);
+  const query = `[out:json][timeout:15];(
+    node["amenity"="fuel"](around:${radius},${latitude},${longitude});
+    way["amenity"="fuel"](around:${radius},${latitude},${longitude});
+    relation["amenity"="fuel"](around:${radius},${latitude},${longitude});
+  );out tags center qt ${maxResults};`;
+  const response = await overpassRequest(query);
+  return {stations: sanitizeOsmStations(response.elements).slice(0, maxResults)};
+}
+
+async function overpassTextStations(
+  queryText: string,
+  latitude: number | null,
+  longitude: number | null,
+  maxResults: number,
+): Promise<UnknownMap> {
+  const term = escapeOverpassRegex(queryText);
+  const spatialFilter =
+    latitude !== null && longitude !== null
+      ? `(around:25000,${latitude},${longitude})`
+      : `(area.india)`;
+  const areaPrefix =
+    latitude !== null && longitude !== null
+      ? ""
+      : 'area["ISO3166-1"="IN"]["admin_level"="2"]->.india;';
+  const query = `[out:json][timeout:20];${areaPrefix}(
+    node["amenity"="fuel"]["name"~"${term}",i]${spatialFilter};
+    way["amenity"="fuel"]["name"~"${term}",i]${spatialFilter};
+    relation["amenity"="fuel"]["name"~"${term}",i]${spatialFilter};
+    node["amenity"="fuel"]["brand"~"${term}",i]${spatialFilter};
+    way["amenity"="fuel"]["brand"~"${term}",i]${spatialFilter};
+    relation["amenity"="fuel"]["brand"~"${term}",i]${spatialFilter};
+    node["amenity"="fuel"]["operator"~"${term}",i]${spatialFilter};
+    way["amenity"="fuel"]["operator"~"${term}",i]${spatialFilter};
+    relation["amenity"="fuel"]["operator"~"${term}",i]${spatialFilter};
+  );out tags center qt ${maxResults};`;
+  const response = await overpassRequest(query);
+  return {stations: sanitizeOsmStations(response.elements).slice(0, maxResults)};
+}
+
+async function overpassStationDetails(osmId: OsmPlaceId): Promise<UnknownMap> {
+  const query = `[out:json][timeout:10];${osmId.type}(${osmId.id});out tags center 1;`;
+  const response = await overpassRequest(query);
+  const station = sanitizeOsmStations(response.elements)[0] ?? null;
+  return {station};
+}
+
+async function overpassRequest(query: string): Promise<UnknownMap> {
+  const response = await fetch("https://overpass-api.de/api/interpreter", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+      "User-Agent": "E0 Finder station backend (https://e0-finder.app)",
+    },
+    body: new URLSearchParams({data: query}),
+  });
+  const bodyText = await response.text();
+  const body = bodyText ? objectValue(JSON.parse(bodyText)) : {};
+  if (response.ok) return body;
+  throw new PublicError(
+    response.status === 429 ? 429 : 503,
+    "OpenStreetMap station data is temporarily unavailable.",
+    {osmStatus: response.status, osmError: bodyText.slice(0, 500)},
+  );
+}
+
+function sanitizeOsmStations(value: unknown): UnknownMap[] {
+  return (Array.isArray(value) ? value : [])
+    .map(sanitizeOsmPlace)
+    .filter((station): station is UnknownMap => station !== null);
+}
+
+function sanitizeOsmPlace(value: unknown): UnknownMap | null {
+  const element = objectValue(value);
+  const tags = objectValue(element.tags);
+  const center = objectValue(element.center);
+  const latitude =
+    typeof element.lat === "number"
+      ? element.lat
+      : typeof center.lat === "number"
+        ? center.lat
+        : null;
+  const longitude =
+    typeof element.lon === "number"
+      ? element.lon
+      : typeof center.lon === "number"
+        ? center.lon
+        : null;
+  const type = typeof element.type === "string" ? element.type : "";
+  const id = typeof element.id === "number" ? Math.trunc(element.id) : null;
+  if (!type || id === null || latitude === null || longitude === null) return null;
+
+  const name = firstText(tags.name, tags.brand, tags.operator) || "Fuel station";
+  return {
+    placeId: `osm:${type}:${id}`,
+    name,
+    address: osmAddress(tags),
+    latitude,
+    longitude,
+    googleMapsUri: `https://www.openstreetmap.org/${type}/${id}`,
+    primaryType: "gas_station",
+    phone: firstText(tags.phone, tags["contact:phone"]),
+    isOpen: null,
+    openingHours: typeof tags.opening_hours === "string" ? [tags.opening_hours] : [],
+    rating: null,
+    reviewCount: null,
+    fuelTypes: osmFuelTypes(tags),
+    fuelPriceType: null,
+    price: null,
+    currency: "INR",
+    priceUpdatedAt: null,
+    photoResourceName: null,
+    photoAttributions: [],
+  };
+}
+
+function osmAddress(tags: UnknownMap): string {
+  const parts = [
+    tags["addr:housenumber"],
+    tags["addr:street"],
+    tags["addr:suburb"],
+    tags["addr:city"],
+    tags["addr:state"],
+  ].filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+  return parts.length > 0 ? parts.join(", ") : "Address unavailable";
+}
+
+function osmFuelTypes(tags: UnknownMap): string[] {
+  const fuels = [
+    ["fuel:diesel", "Diesel"],
+    ["fuel:petrol", "Petrol"],
+    ["fuel:octane_91", "Petrol 91"],
+    ["fuel:octane_95", "Petrol 95"],
+    ["fuel:octane_98", "Petrol 98"],
+    ["fuel:electricity", "EV charging"],
+    ["fuel:cng", "CNG"],
+    ["fuel:lpg", "LPG"],
+  ];
+  return fuels
+    .filter(([key]) => tags[key] === "yes")
+    .map(([, label]) => label);
+}
+
+function firstText(...values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+function escapeOverpassRegex(value: string): string {
+  return value.replace(/[\\"\[\]().*+?^${}|]/g, "\\$&");
+}
+
+type OsmPlaceId = {type: "node" | "way" | "relation"; id: number};
+
+function parseOsmPlaceId(value: string): OsmPlaceId | null {
+  const match = /^osm:(node|way|relation):(\d+)$/.exec(value);
+  if (!match) return null;
+  return {type: match[1] as OsmPlaceId["type"], id: Number(match[2])};
+}
+
+function hasGooglePlacesKey(env: Env): boolean {
+  return Boolean(env.GOOGLE_PLACES_API_KEY?.trim());
+}
+
+function shouldUseOsmFallback(error: unknown): boolean {
+  if (!(error instanceof PublicError)) return false;
+  const details = objectValue(error.details);
+  return details.googleStatus === 403 || details.googleStatus === 503;
+}
 async function placesRequest(
   path: string,
   init: RequestInit,
@@ -221,9 +416,13 @@ async function placesFetch(
   env: Env,
   fieldMask?: string,
 ): Promise<{ok: true; body: UnknownMap} | {ok: false; status: number; googleError: UnknownMap}> {
+  const apiKey = env.GOOGLE_PLACES_API_KEY?.trim();
+  if (!apiKey) {
+    return {ok: false, status: 503, googleError: {status: "MISSING_API_KEY"}};
+  }
   const headers = new Headers(init.headers);
   headers.set("Content-Type", "application/json");
-  headers.set("X-Goog-Api-Key", env.GOOGLE_PLACES_API_KEY.trim());
+  headers.set("X-Goog-Api-Key", apiKey);
   if (fieldMask) headers.set("X-Goog-FieldMask", fieldMask);
 
   const maxAttempts = 3;
@@ -496,7 +695,3 @@ class PublicError extends Error {
     super(message);
   }
 }
-
-
-
-
