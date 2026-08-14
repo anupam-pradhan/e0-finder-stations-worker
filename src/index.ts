@@ -60,8 +60,9 @@ export default {
           ? error.message
           : "Google station data is temporarily unavailable.";
       const status = error instanceof PublicError ? error.status : 503;
+      const details = error instanceof PublicError ? error.details : undefined;
       if (!(error instanceof PublicError)) console.error(error);
-      return json({error: message}, status, cors);
+      return json({error: message, ...(details ? {details} : {})}, status, cors);
     }
   },
 };
@@ -203,10 +204,12 @@ async function placesRequest(
     if (!retryable || attempt === maxAttempts) break;
     await sleep(200 * Math.pow(2, attempt - 1));
   }
-  console.error("Places request failed", lastStatus, lastBody);
+  const googleError = parseGoogleError(lastBody);
+  console.error("Places request failed", lastStatus, googleError);
   throw new PublicError(
     lastStatus === 429 ? 429 : 503,
     placesErrorMessage(lastStatus),
+    {googleStatus: lastStatus, googleError},
   );
 }
 
@@ -288,6 +291,21 @@ function sanitizePlace(value: unknown): UnknownMap | null {
   };
 }
 
+function parseGoogleError(body: string): UnknownMap {
+  try {
+    const parsed = objectValue(JSON.parse(body));
+    const error = objectValue(parsed.error);
+    const message = typeof error.message === "string" ? error.message.slice(0, 500) : "";
+    return {
+      code: typeof error.code === "number" ? error.code : null,
+      status: typeof error.status === "string" ? error.status : null,
+      message: message || null,
+    };
+  } catch {
+    return {message: body.slice(0, 500) || null};
+  }
+}
+
 function placesErrorMessage(status: number): string {
   if (status === 400) {
     return "Google Places rejected the station request. Check Places API setup.";
@@ -300,6 +318,7 @@ function placesErrorMessage(status: number): string {
   }
   return "Google station data is temporarily unavailable. Places status: " + status + ".";
 }
+
 function parseFuelOptions(value: unknown): {
   fuelTypes: string[];
   fuelPriceType: string | null;
@@ -407,6 +426,7 @@ class PublicError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    readonly details?: UnknownMap,
   ) {
     super(message);
   }
