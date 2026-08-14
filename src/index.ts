@@ -26,9 +26,6 @@ const basePlaceFields = [
   "places.displayName",
   "places.formattedAddress",
   "places.location",
-  "places.googleMapsUri",
-  "places.primaryType",
-  "places.photos",
 ].join(",");
 
 const richDetailFields = richPlaceFields.replaceAll("places.", "");
@@ -212,10 +209,10 @@ async function placesRequest(
     console.warn("Places rich fields denied; retrying with base fields", firstResult.googleError);
     const fallbackResult = await placesFetch(path, init, env, fallbackFieldMask);
     if (fallbackResult.ok) return fallbackResult.body;
-    throwPlacesError(fallbackResult.status, fallbackResult.googleError);
+    throwPlacesError(fallbackResult.status, fallbackResult.googleError, "base");
   }
 
-  throwPlacesError(firstResult.status, firstResult.googleError);
+  throwPlacesError(firstResult.status, firstResult.googleError, "rich");
 }
 
 async function placesFetch(
@@ -226,7 +223,7 @@ async function placesFetch(
 ): Promise<{ok: true; body: UnknownMap} | {ok: false; status: number; googleError: UnknownMap}> {
   const headers = new Headers(init.headers);
   headers.set("Content-Type", "application/json");
-  headers.set("X-Goog-Api-Key", env.GOOGLE_PLACES_API_KEY);
+  headers.set("X-Goog-Api-Key", env.GOOGLE_PLACES_API_KEY.trim());
   if (fieldMask) headers.set("X-Goog-FieldMask", fieldMask);
 
   const maxAttempts = 3;
@@ -249,11 +246,15 @@ async function placesFetch(
   return {ok: false, status: lastStatus, googleError};
 }
 
-function throwPlacesError(status: number, googleError: UnknownMap): never {
+function throwPlacesError(
+  status: number,
+  googleError: UnknownMap,
+  requestMode: "rich" | "base",
+): never {
   throw new PublicError(
     status === 429 ? 429 : 503,
     placesErrorMessage(status),
-    {googleStatus: status, googleError},
+    {googleStatus: status, googleError, requestMode},
   );
 }
 
@@ -479,4 +480,6 @@ class PublicError extends Error {
     super(message);
   }
 }
+
+
 
