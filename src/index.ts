@@ -50,6 +50,9 @@ export default {
       if (url.pathname === "/searchStations") {
         return json(await searchStations(data, env), 200, cors);
       }
+      if (url.pathname === "/searchStationsBounds") {
+        return json(await searchStationsBounds(data, env), 200, cors);
+      }
       if (url.pathname === "/searchStationsText") {
         return json(await searchStationsText(data, env), 200, cors);
       }
@@ -86,6 +89,26 @@ async function searchStations(data: UnknownMap, env: Env): Promise<UnknownMap> {
     finiteNumber(data.maxResults ?? 20, "result count", 1, 20),
   );
   return overpassNearbyStations(latitude, longitude, radiusMeters, maxResults);
+}
+
+async function searchStationsBounds(
+  data: UnknownMap,
+  env: Env,
+): Promise<UnknownMap> {
+  const south = finiteNumber(data.south, "south latitude", -90, 90);
+  const west = finiteNumber(data.west, "west longitude", -180, 180);
+  const north = finiteNumber(data.north, "north latitude", -90, 90);
+  const east = finiteNumber(data.east, "east longitude", -180, 180);
+  if (south >= north) {
+    throw new PublicError(400, "Invalid viewport latitude range.");
+  }
+  if (west >= east) {
+    throw new PublicError(400, "Invalid viewport longitude range.");
+  }
+  const maxResults = Math.trunc(
+    finiteNumber(data.maxResults ?? 80, "result count", 1, 100),
+  );
+  return overpassBoundsStations({south, west, north, east}, maxResults);
 }
 
 async function searchStationsText(
@@ -141,6 +164,20 @@ async function overpassNearbyStations(
   return {stations: sanitizeOsmStations(response.elements).slice(0, maxResults)};
 }
 
+type Bounds = {south: number; west: number; north: number; east: number};
+
+async function overpassBoundsStations(
+  bounds: Bounds,
+  maxResults: number,
+): Promise<UnknownMap> {
+  const bbox = [bounds.south, bounds.west, bounds.north, bounds.east].join(",");
+  const query = `[out:json][timeout:20];
+    nwr["amenity"="fuel"](${bbox});
+    out tags center qt ${maxResults};`;
+  const response = await overpassRequest(query);
+  return {stations: sanitizeOsmStations(response.elements).slice(0, maxResults)};
+}
+
 async function overpassTextStations(
   queryText: string,
   latitude: number | null,
@@ -188,7 +225,18 @@ async function overpassRequest(query: string): Promise<UnknownMap> {
     body: new URLSearchParams({data: query}),
   });
   const bodyText = await response.text();
-  const body = bodyText ? objectValue(JSON.parse(bodyText)) : {};
+  let body: UnknownMap = {};
+  try {
+    body = bodyText ? objectValue(JSON.parse(bodyText)) : {};
+  } catch {
+    if (response.ok) {
+      throw new PublicError(
+        503,
+        "OpenStreetMap station data is temporarily unavailable.",
+        {osmStatus: response.status, osmError: bodyText.slice(0, 500)},
+      );
+    }
+  }
   if (response.ok) return body;
   throw new PublicError(
     response.status === 429 ? 429 : 503,
