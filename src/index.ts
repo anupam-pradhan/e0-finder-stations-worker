@@ -1,36 +1,9 @@
 export interface Env {
-  GOOGLE_PLACES_API_KEY?: string;
   ALLOWED_ORIGIN?: string;
 }
 
 type UnknownMap = Record<string, unknown>;
 
-const richPlaceFields = [
-  "places.id",
-  "places.displayName",
-  "places.formattedAddress",
-  "places.location",
-  "places.googleMapsUri",
-  "places.primaryType",
-  "places.nationalPhoneNumber",
-  "places.currentOpeningHours",
-  "places.regularOpeningHours",
-  "places.rating",
-  "places.userRatingCount",
-  "places.fuelOptions",
-  "places.photos",
-].join(",");
-
-const basePlaceFields = [
-  "places.id",
-  "places.displayName",
-  "places.formattedAddress",
-  "places.location",
-].join(",");
-
-const richDetailFields = richPlaceFields.replaceAll("places.", "");
-const baseDetailFields = basePlaceFields.replaceAll("places.", "");
-const placeIdPattern = /^[A-Za-z0-9_-]{10,256}$/;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -67,7 +40,7 @@ export default {
       const message =
         error instanceof PublicError
           ? error.message
-          : "Google station data is temporarily unavailable.";
+          : "Station data is temporarily unavailable.";
       const status = error instanceof PublicError ? error.status : 503;
       const details = error instanceof PublicError ? error.details : undefined;
       if (!(error instanceof PublicError)) console.error(error);
@@ -139,9 +112,10 @@ async function getStationDetails(
 ): Promise<UnknownMap> {
   const rawPlaceId = typeof data.placeId === "string" ? data.placeId : "";
   const osmId = parseOsmPlaceId(rawPlaceId);
-  if (osmId) return overpassStationDetails(osmId);
-  validPlaceId(rawPlaceId);
-  return {station: null};
+  if (!osmId) {
+    throw new PublicError(400, "Invalid OpenStreetMap station ID.");
+  }
+  return overpassStationDetails(osmId);
 }
 
 async function getPlacePhoto(_data: UnknownMap, _env: Env): Promise<UnknownMap> {
@@ -278,7 +252,7 @@ function sanitizeOsmPlace(value: unknown): UnknownMap | null {
     address: osmAddress(tags),
     latitude,
     longitude,
-    googleMapsUri: `https://www.openstreetmap.org/${type}/${id}`,
+    sourceUri: `https://www.openstreetmap.org/${type}/${id}`,
     primaryType: "gas_station",
     phone: firstText(tags.phone, tags["contact:phone"]),
     isOpen: null,
@@ -339,204 +313,6 @@ function parseOsmPlaceId(value: string): OsmPlaceId | null {
   const match = /^osm:(node|way|relation):(\d+)$/.exec(value);
   if (!match) return null;
   return {type: match[1] as OsmPlaceId["type"], id: Number(match[2])};
-}
-
-async function placesRequest(
-  path: string,
-  init: RequestInit,
-  env: Env,
-  fieldMask?: string,
-  fallbackFieldMask?: string,
-): Promise<UnknownMap> {
-  const firstResult = await placesFetch(path, init, env, fieldMask);
-  if (firstResult.ok) return firstResult.body;
-
-  if (
-    fallbackFieldMask &&
-    fieldMask !== fallbackFieldMask &&
-    firstResult.status === 403 &&
-    isPermissionDenied(firstResult.googleError)
-  ) {
-    console.warn("Places rich fields denied; retrying with base fields", firstResult.googleError);
-    const fallbackResult = await placesFetch(path, init, env, fallbackFieldMask);
-    if (fallbackResult.ok) return fallbackResult.body;
-    throwPlacesError(fallbackResult.status, fallbackResult.googleError, "base");
-  }
-
-  throwPlacesError(firstResult.status, firstResult.googleError, "rich");
-}
-
-async function placesFetch(
-  path: string,
-  init: RequestInit,
-  env: Env,
-  fieldMask?: string,
-): Promise<{ok: true; body: UnknownMap} | {ok: false; status: number; googleError: UnknownMap}> {
-  const apiKey = env.GOOGLE_PLACES_API_KEY?.trim();
-  if (!apiKey) {
-    return {ok: false, status: 503, googleError: {status: "MISSING_API_KEY"}};
-  }
-  const headers = new Headers(init.headers);
-  headers.set("Content-Type", "application/json");
-  headers.set("X-Goog-Api-Key", apiKey);
-  if (fieldMask) headers.set("X-Goog-FieldMask", fieldMask);
-
-  const maxAttempts = 3;
-  let lastStatus = 0;
-  let lastBody = "";
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const response = await fetch("https://places.googleapis.com/v1/" + path, {
-      ...init,
-      headers,
-    });
-    if (response.ok) return {ok: true, body: objectValue(await response.json())};
-    lastStatus = response.status;
-    lastBody = await response.text();
-    const retryable = response.status === 429 || response.status >= 500;
-    if (!retryable || attempt === maxAttempts) break;
-    await sleep(200 * Math.pow(2, attempt - 1));
-  }
-  const googleError = parseGoogleError(lastBody);
-  console.error("Places request failed", lastStatus, googleError);
-  return {ok: false, status: lastStatus, googleError};
-}
-
-function throwPlacesError(
-  status: number,
-  googleError: UnknownMap,
-  requestMode: "rich" | "base",
-): never {
-  throw new PublicError(
-    status === 429 ? 429 : 503,
-    placesErrorMessage(status),
-    {googleStatus: status, googleError, requestMode},
-  );
-}
-
-function isPermissionDenied(error: UnknownMap): boolean {
-  return error.status === "PERMISSION_DENIED";
-}
-
-function sanitizeStations(value: unknown): UnknownMap[] {
-  return (Array.isArray(value) ? value : [])
-    .map(sanitizePlace)
-    .filter((station): station is UnknownMap => station !== null);
-}
-
-function sanitizePlace(value: unknown): UnknownMap | null {
-  const place = objectValue(value);
-  const id = typeof place.id === "string" ? place.id : "";
-  const location = objectValue(place.location);
-  const latitude =
-    typeof location.latitude === "number" ? location.latitude : null;
-  const longitude =
-    typeof location.longitude === "number" ? location.longitude : null;
-  if (!id || latitude === null || longitude === null) return null;
-
-  const hours = objectValue(
-    place.currentOpeningHours ?? place.regularOpeningHours,
-  );
-  const descriptions = Array.isArray(hours.weekdayDescriptions)
-    ? hours.weekdayDescriptions.filter(
-        (item): item is string => typeof item === "string",
-      )
-    : [];
-  const photos = Array.isArray(place.photos) ? place.photos : [];
-  const photo = objectValue(photos[0]);
-  const attributions = Array.isArray(photo.authorAttributions)
-    ? photo.authorAttributions.map((item) => {
-        const attribution = objectValue(item);
-        return {
-          displayName:
-            typeof attribution.displayName === "string"
-              ? attribution.displayName
-              : "Google Maps contributor",
-          uri: typeof attribution.uri === "string" ? attribution.uri : "",
-          photoUri:
-            typeof attribution.photoUri === "string"
-              ? attribution.photoUri
-              : null,
-        };
-      })
-    : [];
-  const fuelPrice = parseFuelOptions(place.fuelOptions);
-
-  return {
-    placeId: id,
-    name: textValue(place.displayName) || "Fuel station",
-    address:
-      typeof place.formattedAddress === "string"
-        ? place.formattedAddress
-        : "Address unavailable",
-    latitude,
-    longitude,
-    googleMapsUri:
-      typeof place.googleMapsUri === "string" ? place.googleMapsUri : "",
-    primaryType:
-      typeof place.primaryType === "string" ? place.primaryType : "gas_station",
-    phone:
-      typeof place.nationalPhoneNumber === "string"
-        ? place.nationalPhoneNumber
-        : null,
-    isOpen: typeof hours.openNow === "boolean" ? hours.openNow : null,
-    openingHours: descriptions,
-    rating: typeof place.rating === "number" ? place.rating : null,
-    reviewCount:
-      typeof place.userRatingCount === "number"
-        ? place.userRatingCount
-        : null,
-    fuelTypes: fuelPrice.fuelTypes,
-    fuelPriceType: fuelPrice.fuelPriceType,
-    price: fuelPrice.price,
-    currency: fuelPrice.currency,
-    priceUpdatedAt: fuelPrice.priceUpdatedAt,
-    photoResourceName: typeof photo.name === "string" ? photo.name : null,
-    photoAttributions: attributions,
-  };
-}
-
-function parseGoogleError(body: string): UnknownMap {
-  try {
-    const parsed = objectValue(JSON.parse(body));
-    const error = objectValue(parsed.error);
-    const message = typeof error.message === "string" ? error.message.slice(0, 500) : "";
-    const details = Array.isArray(error.details)
-      ? error.details.map((item) => sanitizeGoogleErrorDetail(item))
-      : [];
-    return {
-      code: typeof error.code === "number" ? error.code : null,
-      status: typeof error.status === "string" ? error.status : null,
-      message: message || null,
-      details,
-    };
-  } catch {
-    return {message: body.slice(0, 500) || null};
-  }
-}
-
-function sanitizeGoogleErrorDetail(value: unknown): UnknownMap {
-  const detail = objectValue(value);
-  const metadata = objectValue(detail.metadata);
-  return {
-    type: typeof detail["@type"] === "string" ? detail["@type"] : null,
-    reason: typeof detail.reason === "string" ? detail.reason : null,
-    domain: typeof detail.domain === "string" ? detail.domain : null,
-    service: typeof metadata.service === "string" ? metadata.service : null,
-    consumer: typeof metadata.consumer === "string" ? metadata.consumer : null,
-  };
-}
-
-function placesErrorMessage(status: number): string {
-  if (status === 400) {
-    return "Google Places rejected the station request. Check Places API setup.";
-  }
-  if (status === 403) {
-    return "Google Places access is blocked. Check API key restrictions, billing, and Places API (New).";
-  }
-  if (status === 429) {
-    return "Google Places quota is exhausted. Check quota and billing.";
-  }
-  return "Google station data is temporarily unavailable. Places status: " + status + ".";
 }
 
 function parseFuelOptions(value: unknown): {
@@ -612,12 +388,6 @@ function finiteNumber(
   return value;
 }
 
-function validPlaceId(value: unknown): string {
-  if (typeof value !== "string" || !placeIdPattern.test(value)) {
-    throw new PublicError(400, "Invalid Google Place ID.");
-  }
-  return value;
-}
 
 function json(body: unknown, status: number, cors: HeadersInit): Response {
   return new Response(JSON.stringify(body), {

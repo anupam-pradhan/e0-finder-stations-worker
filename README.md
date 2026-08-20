@@ -2,6 +2,8 @@
 
 Cloudflare Worker backend for E0 Finder live station data.
 
+Station search uses OpenStreetMap data through the Overpass API. No Google Maps or Google Places API key is required for station discovery.
+
 ## Cloudflare Git Deploy Settings
 
 - Root directory: `/`
@@ -9,18 +11,10 @@ Cloudflare Worker backend for E0 Finder live station data.
 - Deploy command: `npm run deploy`
 - Wrangler config: `wrangler.toml`
 
-## Required Secret
+## Flutter App Build
 
-Set this Worker secret in Cloudflare before deployment:
-
-```bash
-GOOGLE_PLACES_API_KEY
-```
-
-The Flutter app must be built with:
+The Flutter app should point station data to this Worker:
 
 ```bash
 --dart-define=STATION_API_BASE_URL=https://YOUR-WORKER.YOUR-SUBDOMAIN.workers.dev
 ```
-
-Do not commit the Google Places API key.
