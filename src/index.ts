@@ -21,16 +21,16 @@ export default {
 
       const data = await readJson(request);
       if (url.pathname === "/searchStations") {
-        return json(await searchStations(data, env), 200, cors);
+        return cachedJson(url.pathname, data, cors, 21600, () => searchStations(data, env));
       }
       if (url.pathname === "/searchStationsBounds") {
-        return json(await searchStationsBounds(data, env), 200, cors);
+        return cachedJson(url.pathname, data, cors, 21600, () => searchStationsBounds(data, env));
       }
       if (url.pathname === "/searchStationsText") {
-        return json(await searchStationsText(data, env), 200, cors);
+        return cachedJson(url.pathname, data, cors, 21600, () => searchStationsText(data, env));
       }
       if (url.pathname === "/getStationDetails") {
-        return json(await getStationDetails(data, env), 200, cors);
+        return cachedJson(url.pathname, data, cors, 86400, () => getStationDetails(data, env));
       }
       if (url.pathname === "/getPlacePhoto") {
         return json(await getPlacePhoto(data, env), 200, cors);
@@ -404,17 +404,86 @@ function finiteNumber(
 }
 
 
-function json(body: unknown, status: number, cors: HeadersInit): Response {
+async function cachedJson(
+  pathname: string,
+  data: UnknownMap,
+  cors: HeadersInit,
+  ttlSeconds: number,
+  producer: () => Promise<UnknownMap>,
+): Promise<Response> {
+  const cache = caches.default;
+  const cacheKey = new Request(
+    "https://e0-finder-worker-cache.local" + pathname + "?" + stableCacheKey(data),
+    {method: "GET"},
+  );
+  const cached = await cache.match(cacheKey);
+  if (cached) {
+    const body = await cached.text();
+    return new Response(body, {
+      status: cached.status,
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": `public, max-age=${ttlSeconds}`,
+        "X-E0-Cache": "HIT",
+        ...cors,
+      },
+    });
+  }
+
+  const body = await producer();
+  const response = json(body, 200, cors, `public, max-age=${ttlSeconds}`, "MISS");
+  try {
+    await cache.put(cacheKey, response.clone());
+  } catch (error) {
+    console.warn("Station cache write failed", error);
+  }
+  return response;
+}
+
+function json(
+  body: unknown,
+  status: number,
+  cors: HeadersInit,
+  cacheControl = "no-store",
+  cacheStatus?: "HIT" | "MISS",
+): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: {
       "Content-Type": "application/json; charset=utf-8",
-      "Cache-Control": "no-store",
+      "Cache-Control": cacheControl,
+      ...(cacheStatus ? {"X-E0-Cache": cacheStatus} : {}),
       ...cors,
     },
   });
 }
 
+function stableCacheKey(data: UnknownMap): string {
+  return encodeURIComponent(JSON.stringify(canonicalCacheValue(data)));
+}
+
+function canonicalCacheValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalCacheValue);
+  if (!value || typeof value !== "object") {
+    return typeof value === "number" ? Math.round(value * 10000) / 10000 : value;
+  }
+  const source = value as UnknownMap;
+  const normalized: UnknownMap = {};
+  for (const key of Object.keys(source).sort()) {
+    const item = source[key];
+    normalized[key] = typeof item === "number" ? canonicalNumber(key, item) : canonicalCacheValue(item);
+  }
+  return normalized;
+}
+
+function canonicalNumber(key: string, value: number): number {
+  if (!Number.isFinite(value)) return value;
+  if (["latitude", "longitude", "south", "west", "north", "east"].includes(key)) {
+    return Math.round(value * 1000) / 1000;
+  }
+  if (key === "radiusMeters") return Math.round(value / 1000) * 1000;
+  return Math.round(value * 10000) / 10000;
+}
 function corsHeaders(env: Env): Record<string, string> {
   return {
     "Access-Control-Allow-Origin": env.ALLOWED_ORIGIN || "*",
