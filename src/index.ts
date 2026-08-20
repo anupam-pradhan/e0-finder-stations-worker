@@ -159,27 +159,28 @@ async function overpassTextStations(
   maxResults: number,
 ): Promise<UnknownMap> {
   const term = escapeOverpassRegex(queryText);
-  const spatialFilter =
-    latitude !== null && longitude !== null
-      ? `(around:25000,${latitude},${longitude})`
-      : `(area.india)`;
-  const areaPrefix =
-    latitude !== null && longitude !== null
-      ? ""
-      : 'area["ISO3166-1"="IN"]["admin_level"="2"]->.india;';
-  const query = `[out:json][timeout:20];${areaPrefix}(
-    node["amenity"="fuel"]["name"~"${term}",i]${spatialFilter};
-    way["amenity"="fuel"]["name"~"${term}",i]${spatialFilter};
-    relation["amenity"="fuel"]["name"~"${term}",i]${spatialFilter};
-    node["amenity"="fuel"]["brand"~"${term}",i]${spatialFilter};
-    way["amenity"="fuel"]["brand"~"${term}",i]${spatialFilter};
-    relation["amenity"="fuel"]["brand"~"${term}",i]${spatialFilter};
-    node["amenity"="fuel"]["operator"~"${term}",i]${spatialFilter};
-    way["amenity"="fuel"]["operator"~"${term}",i]${spatialFilter};
-    relation["amenity"="fuel"]["operator"~"${term}",i]${spatialFilter};
-  );out tags center qt ${maxResults};`;
+  const countryPattern = "^(IN|AE|QA|SA|KW|MV|US|FR|OM|BH)$";
+  const query = `[out:json][timeout:25];
+    area["ISO3166-1"~"${countryPattern}"]["admin_level"="2"]->.searchCountries;
+    (
+      node["amenity"="fuel"]["name"~"${term}",i](area.searchCountries);
+      way["amenity"="fuel"]["name"~"${term}",i](area.searchCountries);
+      relation["amenity"="fuel"]["name"~"${term}",i](area.searchCountries);
+      node["amenity"="fuel"]["brand"~"${term}",i](area.searchCountries);
+      way["amenity"="fuel"]["brand"~"${term}",i](area.searchCountries);
+      relation["amenity"="fuel"]["brand"~"${term}",i](area.searchCountries);
+      node["amenity"="fuel"]["operator"~"${term}",i](area.searchCountries);
+      way["amenity"="fuel"]["operator"~"${term}",i](area.searchCountries);
+      relation["amenity"="fuel"]["operator"~"${term}",i](area.searchCountries);
+    );out tags center qt ${Math.min(maxResults * 3, 60)};`;
   const response = await overpassRequest(query);
-  return {stations: sanitizeOsmStations(response.elements).slice(0, maxResults)};
+  const stations = sanitizeOsmStations(response.elements);
+  if (latitude !== null && longitude !== null) {
+    stations.sort(
+      (a, b) => stationDistanceKm(a, latitude, longitude) - stationDistanceKm(b, latitude, longitude),
+    );
+  }
+  return {stations: stations.slice(0, maxResults)};
 }
 
 async function overpassStationDetails(osmId: OsmPlaceId): Promise<UnknownMap> {
@@ -307,6 +308,20 @@ function escapeOverpassRegex(value: string): string {
   return value.replace(/[\\"\[\]().*+?^${}|]/g, "\\$&");
 }
 
+function stationDistanceKm(station: UnknownMap, latitude: number, longitude: number): number {
+  const stationLat = typeof station.latitude === "number" ? station.latitude : null;
+  const stationLng = typeof station.longitude === "number" ? station.longitude : null;
+  if (stationLat === null || stationLng === null) return Number.POSITIVE_INFINITY;
+  const toRadians = (value: number) => (value * Math.PI) / 180;
+  const deltaLat = toRadians(stationLat - latitude);
+  const deltaLng = toRadians(stationLng - longitude);
+  const a =
+    Math.sin(deltaLat / 2) ** 2 +
+    Math.cos(toRadians(latitude)) *
+      Math.cos(toRadians(stationLat)) *
+      Math.sin(deltaLng / 2) ** 2;
+  return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
 type OsmPlaceId = {type: "node" | "way" | "relation"; id: number};
 
 function parseOsmPlaceId(value: string): OsmPlaceId | null {
