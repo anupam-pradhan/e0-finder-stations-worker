@@ -1,7 +1,10 @@
-name = "e0-finder-stations"
+﻿name = "e0-finder-stations"
 main = "src/index.ts"
 compatibility_date = "2026-08-14"
 
 [vars]
 ALLOWED_ORIGIN = "*"
 
+[[r2_buckets]]
+binding = "STATIONS_BUCKET"
+bucket_name = "e0-finder"
