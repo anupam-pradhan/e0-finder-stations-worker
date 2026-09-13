@@ -1,30 +1,23 @@
-﻿export interface Env {
-  ALLOWED_ORIGIN?: string;
-}
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
 
-type UnknownMap = Record<string, unknown>;
-
-// Bounded hot cache and shared requests within a worker isolate.
-const memoryCache = new Map<string, {expires: number; body: string}>();
-const pendingRequests = new Map<string, Promise<{expires: number; body: string}>>();
-
-export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+// src/index.ts
+var memoryCache = /* @__PURE__ */ new Map();
+var pendingRequests = /* @__PURE__ */ new Map();
+var index_default = {
+  async fetch(request, env, ctx) {
     const cors = corsHeaders(env);
     if (request.method === "OPTIONS") {
-      return new Response(null, {status: 204, headers: cors});
+      return new Response(null, { status: 204, headers: cors });
     }
-
     try {
       const url = new URL(request.url);
       if (url.pathname === "/" || url.pathname === "/health") {
-        return json({status: "ok", service: "e0-stations-worker"}, 200, cors);
+        return json({ status: "ok", service: "e0-stations-worker" }, 200, cors);
       }
-
       if (request.method !== "POST") {
-        return json({error: "Use POST."}, 405, cors);
+        return json({ error: "Use POST." }, 405, cors);
       }
-
       const data = await readJson(request);
       if (url.pathname === "/searchStations") {
         return await cachedJson(url, data, cors, 21600, () => searchStations(data, env), ctx);
@@ -41,39 +34,32 @@ export default {
       if (url.pathname === "/getPlacePhoto") {
         return json(await getPlacePhoto(data, env), 200, cors);
       }
-      return json({error: "Unknown endpoint."}, 404, cors);
+      return json({ error: "Unknown endpoint." }, 404, cors);
     } catch (error) {
-      const message =
-        error instanceof PublicError
-          ? error.message
-          : "Station data is temporarily unavailable.";
+      const message = error instanceof PublicError ? error.message : "Station data is temporarily unavailable.";
       const status = error instanceof PublicError ? error.status : 503;
-      const details = error instanceof PublicError ? error.details : undefined;
+      const details = error instanceof PublicError ? error.details : void 0;
       if (!(error instanceof PublicError)) console.error(error);
-      return json({error: message, ...(details ? {details} : {})}, status, cors);
+      return json({ error: message, ...details ? { details } : {} }, status, cors);
     }
-  },
+  }
 };
-
-async function searchStations(data: UnknownMap, env: Env): Promise<UnknownMap> {
+async function searchStations(data, env) {
   const latitude = finiteNumber(data.latitude, "latitude", -90, 90);
   const longitude = finiteNumber(data.longitude, "longitude", -180, 180);
   const radiusMeters = finiteNumber(
     data.radiusMeters,
     "search radius",
     250,
-    50000,
+    5e4
   );
   const maxResults = Math.trunc(
-    finiteNumber(data.maxResults ?? 20, "result count", 1, 100),
+    finiteNumber(data.maxResults ?? 20, "result count", 1, 100)
   );
   return overpassNearbyStations(latitude, longitude, radiusMeters, maxResults);
 }
-
-async function searchStationsBounds(
-  data: UnknownMap,
-  env: Env,
-): Promise<UnknownMap> {
+__name(searchStations, "searchStations");
+async function searchStationsBounds(data, env) {
   const south = finiteNumber(data.south, "south latitude", -90, 90);
   const west = finiteNumber(data.west, "west longitude", -180, 180);
   const north = finiteNumber(data.north, "north latitude", -90, 90);
@@ -85,37 +71,25 @@ async function searchStationsBounds(
     throw new PublicError(400, "Invalid viewport longitude range.");
   }
   const maxResults = Math.trunc(
-    finiteNumber(data.maxResults ?? 80, "result count", 1, 150),
+    finiteNumber(data.maxResults ?? 80, "result count", 1, 150)
   );
-  return overpassBoundsStations({south, west, north, east}, maxResults);
+  return overpassBoundsStations({ south, west, north, east }, maxResults);
 }
-
-async function searchStationsText(
-  data: UnknownMap,
-  env: Env,
-): Promise<UnknownMap> {
+__name(searchStationsBounds, "searchStationsBounds");
+async function searchStationsText(data, env) {
   const query = typeof data.query === "string" ? data.query.trim() : "";
   if (query.length < 2 || query.length > 120) {
     throw new PublicError(400, "Search must contain 2 to 120 characters.");
   }
   const maxResults = Math.trunc(
-    finiteNumber(data.maxResults ?? 20, "result count", 1, 60),
+    finiteNumber(data.maxResults ?? 20, "result count", 1, 60)
   );
-  const latitude =
-    data.latitude === undefined
-      ? null
-      : finiteNumber(data.latitude, "latitude", -90, 90);
-  const longitude =
-    data.longitude === undefined
-      ? null
-      : finiteNumber(data.longitude, "longitude", -180, 180);
+  const latitude = data.latitude === void 0 ? null : finiteNumber(data.latitude, "latitude", -90, 90);
+  const longitude = data.longitude === void 0 ? null : finiteNumber(data.longitude, "longitude", -180, 180);
   return overpassTextStations(query, latitude, longitude, maxResults);
 }
-
-async function getStationDetails(
-  data: UnknownMap,
-  env: Env,
-): Promise<UnknownMap> {
+__name(searchStationsText, "searchStationsText");
+async function getStationDetails(data, env) {
   const rawPlaceId = typeof data.placeId === "string" ? data.placeId : "";
   const osmId = parseOsmPlaceId(rawPlaceId);
   if (!osmId) {
@@ -123,23 +97,17 @@ async function getStationDetails(
   }
   return overpassStationDetails(osmId);
 }
-
-async function getPlacePhoto(_data: UnknownMap, _env: Env): Promise<UnknownMap> {
-  return {photoUri: null};
+__name(getStationDetails, "getStationDetails");
+async function getPlacePhoto(_data, _env) {
+  return { photoUri: null };
 }
-
-const OVERPASS_ENDPOINTS = [
+__name(getPlacePhoto, "getPlacePhoto");
+var OVERPASS_ENDPOINTS = [
   "https://overpass-api.de/api/interpreter",
-  "https://overpass.kumi.systems/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter"
 ];
-
-async function overpassNearbyStations(
-  latitude: number,
-  longitude: number,
-  radiusMeters: number,
-  maxResults: number,
-): Promise<UnknownMap> {
-  const radius = Math.min(Math.trunc(radiusMeters), 50000);
+async function overpassNearbyStations(latitude, longitude, radiusMeters, maxResults) {
+  const radius = Math.min(Math.trunc(radiusMeters), 5e4);
   const query = `[out:json][timeout:2];(
     node["amenity"="fuel"](around:${radius},${latitude},${longitude});
     way["amenity"="fuel"](around:${radius},${latitude},${longitude});
@@ -148,17 +116,12 @@ async function overpassNearbyStations(
   const response = await overpassRequest(query).catch(() => null);
   let stations = sanitizeOsmStations(response?.elements);
   if (stations.length === 0) {
-    stations = await fetchPhotonNearby(latitude, longitude, radius / 1000, maxResults);
+    stations = await fetchPhotonNearby(latitude, longitude, radius / 1e3, maxResults);
   }
-  return {stations: stations.slice(0, maxResults)};
+  return { stations: stations.slice(0, maxResults) };
 }
-
-type Bounds = {south: number; west: number; north: number; east: number};
-
-async function overpassBoundsStations(
-  bounds: Bounds,
-  maxResults: number,
-): Promise<UnknownMap> {
+__name(overpassNearbyStations, "overpassNearbyStations");
+async function overpassBoundsStations(bounds, maxResults) {
   const bbox = [bounds.south, bounds.west, bounds.north, bounds.east].join(",");
   const query = `[out:json][timeout:2];
     nwr["amenity"="fuel"](${bbox});
@@ -170,24 +133,17 @@ async function overpassBoundsStations(
     const centerLon = (bounds.west + bounds.east) / 2;
     stations = await fetchPhotonNearby(centerLat, centerLon, 20, maxResults);
   }
-  return {stations: stations.filter(station =>
-    typeof station.latitude === "number" && typeof station.longitude === "number" &&
-    station.latitude >= bounds.south && station.latitude <= bounds.north &&
-    station.longitude >= bounds.west && station.longitude <= bounds.east
-  ).slice(0, maxResults)};
+  return { stations: stations.filter(
+    (station) => typeof station.latitude === "number" && typeof station.longitude === "number" && station.latitude >= bounds.south && station.latitude <= bounds.north && station.longitude >= bounds.west && station.longitude <= bounds.east
+  ).slice(0, maxResults) };
 }
-
-async function overpassTextStations(
-  queryText: string,
-  latitude: number | null,
-  longitude: number | null,
-  maxResults: number,
-): Promise<UnknownMap> {
-  // A geocoder resolves names/cities quickly; only use the broader scan as fallback.
+__name(overpassBoundsStations, "overpassBoundsStations");
+async function overpassTextStations(queryText, latitude, longitude, maxResults) {
   try {
-    const stations = await fetchPhotonText(queryText, latitude, longitude, maxResults);
-    if (stations.length > 0) return {stations};
-  } catch {}
+    const stations2 = await fetchPhotonText(queryText, latitude, longitude, maxResults);
+    if (stations2.length > 0) return { stations: stations2 };
+  } catch {
+  }
   const term = escapeOverpassRegex(queryText);
   const countryPattern = "^(IN|AE|QA|SA|KW|MV|US|FR|OM|BH)$";
   const query = `[out:json][timeout:2];
@@ -209,28 +165,31 @@ async function overpassTextStations(
     if (response === null) throw new PublicError(503, "Station sources are temporarily unavailable.");
   } else if (latitude !== null && longitude !== null) {
     stations.sort(
-      (a, b) => stationDistanceKm(a, latitude, longitude) - stationDistanceKm(b, latitude, longitude),
+      (a, b) => stationDistanceKm(a, latitude, longitude) - stationDistanceKm(b, latitude, longitude)
     );
   }
-  return {stations: stations.slice(0, maxResults)};
+  return { stations: stations.slice(0, maxResults) };
 }
-
-async function overpassStationDetails(osmId: OsmPlaceId): Promise<UnknownMap> {
-  // Nodes include coordinates in the element API; ways/relations need Overpass centers.
+__name(overpassTextStations, "overpassTextStations");
+async function overpassStationDetails(osmId) {
   if (osmId.type === "node") {
     try {
       const data = await upstreamJson(
-        "https://api.openstreetmap.org/api/0.6/node/" + osmId.id + ".json", {}, 1500);
+        "https://api.openstreetmap.org/api/0.6/node/" + osmId.id + ".json",
+        {},
+        1500
+      );
       const station = sanitizeOsmStations(data.elements)[0] ?? null;
-      if (station) return {station};
-    } catch {}
+      if (station) return { station };
+    } catch {
+    }
   }
   const query = "[out:json][timeout:1];" + osmId.type + "(" + osmId.id + ");out body center 1;";
-  const response = await overpassRequest(query, 1000);
-  return {station: sanitizeOsmStations(response.elements)[0] ?? null};
+  const response = await overpassRequest(query, 1e3);
+  return { station: sanitizeOsmStations(response.elements)[0] ?? null };
 }
-
-async function upstreamJson(url: string, init: RequestInit = {}, timeoutMs = 2000): Promise<UnknownMap> {
+__name(overpassStationDetails, "overpassStationDetails");
+async function upstreamJson(url, init = {}, timeoutMs = 2e3) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -238,9 +197,9 @@ async function upstreamJson(url: string, init: RequestInit = {}, timeoutMs = 200
       ...init,
       headers: {
         "User-Agent": "E0FinderBot/1.0 (+https://e0finder.com)",
-        ...init.headers,
+        ...init.headers
       },
-      signal: controller.signal,
+      signal: controller.signal
     });
     if (!response.ok) throw new PublicError(503, "Station source is unavailable.");
     return objectValue(await response.json());
@@ -248,32 +207,27 @@ async function upstreamJson(url: string, init: RequestInit = {}, timeoutMs = 200
     clearTimeout(timer);
   }
 }
-
-async function overpassRequest(query: string, timeoutMs = 3000): Promise<UnknownMap> {
+__name(upstreamJson, "upstreamJson");
+async function overpassRequest(query, timeoutMs = 3e3) {
   for (const endpoint of OVERPASS_ENDPOINTS) {
     try {
       const body = await upstreamJson(endpoint, {
         method: "POST",
-        headers: {"Content-Type": "application/x-www-form-urlencoded; charset=utf-8"},
-        body: new URLSearchParams({data: query}),
+        headers: { "Content-Type": "application/x-www-form-urlencoded; charset=utf-8" },
+        body: new URLSearchParams({ data: query })
       }, timeoutMs);
       if (Array.isArray(body.elements) && !body.remark) return body;
-    } catch {}
+    } catch {
+    }
   }
   throw new PublicError(503, "Station sources are temporarily unavailable.");
 }
-
-async function fetchPhotonNearby(
-  lat: number, lon: number, radiusKm: number, maxResults: number,
-): Promise<UnknownMap[]> {
-  return (await fetchPhotonText("fuel", lat, lon, maxResults))
-    .filter(station => stationDistanceKm(station, lat, lon) <= radiusKm)
-    .sort((a, b) => stationDistanceKm(a, lat, lon) - stationDistanceKm(b, lat, lon));
+__name(overpassRequest, "overpassRequest");
+async function fetchPhotonNearby(lat, lon, radiusKm, maxResults) {
+  return (await fetchPhotonText("fuel", lat, lon, maxResults)).filter((station) => stationDistanceKm(station, lat, lon) <= radiusKm).sort((a, b) => stationDistanceKm(a, lat, lon) - stationDistanceKm(b, lat, lon));
 }
-
-async function fetchPhotonText(
-  query: string, lat: number | null, lon: number | null, maxResults: number,
-): Promise<UnknownMap[]> {
+__name(fetchPhotonNearby, "fetchPhotonNearby");
+async function fetchPhotonText(query, lat, lon, maxResults) {
   const url = new URL("https://photon.komoot.io/api/");
   url.searchParams.set("q", query);
   url.searchParams.set("osm_tag", "amenity:fuel");
@@ -286,16 +240,14 @@ async function fetchPhotonText(
   if (!Array.isArray(data.features)) throw new PublicError(503, "Invalid station source response.");
   return parsePhotonFeatures(data.features).slice(0, maxResults);
 }
-
-function parsePhotonFeatures(features: any[]): UnknownMap[] {
-  const results: UnknownMap[] = [];
+__name(fetchPhotonText, "fetchPhotonText");
+function parsePhotonFeatures(features) {
+  const results = [];
   for (const f of features) {
     const geom = f.geometry || {};
     const coords = geom.coordinates || [];
     const props = f.properties || {};
-    if (coords.length < 2 || props.osm_key !== "amenity" || props.osm_value !== "fuel" ||
-        !Number.isFinite(coords[0]) || !Number.isFinite(coords[1]) ||
-        Math.abs(coords[0]) > 180 || Math.abs(coords[1]) > 90) continue;
+    if (coords.length < 2 || props.osm_key !== "amenity" || props.osm_value !== "fuel" || !Number.isFinite(coords[0]) || !Number.isFinite(coords[1]) || Math.abs(coords[0]) > 180 || Math.abs(coords[1]) > 90) continue;
     const fLon = coords[0];
     const fLat = coords[1];
     const rawType = String(props.osm_type || "N").toUpperCase();
@@ -323,38 +275,25 @@ function parsePhotonFeatures(features: any[]): UnknownMap[] {
       currency: "INR",
       priceUpdatedAt: null,
       photoResourceName: null,
-      photoAttributions: [],
+      photoAttributions: []
     });
   }
   return results;
 }
-
-function sanitizeOsmStations(value: unknown): UnknownMap[] {
-  return (Array.isArray(value) ? value : [])
-    .map(sanitizeOsmPlace)
-    .filter((station): station is UnknownMap => station !== null);
+__name(parsePhotonFeatures, "parsePhotonFeatures");
+function sanitizeOsmStations(value) {
+  return (Array.isArray(value) ? value : []).map(sanitizeOsmPlace).filter((station) => station !== null);
 }
-
-function sanitizeOsmPlace(value: unknown): UnknownMap | null {
+__name(sanitizeOsmStations, "sanitizeOsmStations");
+function sanitizeOsmPlace(value) {
   const element = objectValue(value);
   const tags = objectValue(element.tags);
   const center = objectValue(element.center);
-  const latitude =
-    typeof element.lat === "number"
-      ? element.lat
-      : typeof center.lat === "number"
-        ? center.lat
-        : null;
-  const longitude =
-    typeof element.lon === "number"
-      ? element.lon
-      : typeof center.lon === "number"
-        ? center.lon
-        : null;
+  const latitude = typeof element.lat === "number" ? element.lat : typeof center.lat === "number" ? center.lat : null;
+  const longitude = typeof element.lon === "number" ? element.lon : typeof center.lon === "number" ? center.lon : null;
   const type = typeof element.type === "string" ? element.type : "";
   const id = typeof element.id === "number" ? Math.trunc(element.id) : null;
   if (!type || id === null || latitude === null || longitude === null) return null;
-
   const name = firstText(tags.name, tags.brand, tags.operator) || "Fuel station";
   return {
     placeId: `osm:${type}:${id}`,
@@ -375,22 +314,22 @@ function sanitizeOsmPlace(value: unknown): UnknownMap | null {
     currency: "INR",
     priceUpdatedAt: null,
     photoResourceName: null,
-    photoAttributions: [],
+    photoAttributions: []
   };
 }
-
-function osmAddress(tags: UnknownMap): string {
+__name(sanitizeOsmPlace, "sanitizeOsmPlace");
+function osmAddress(tags) {
   const parts = [
     tags["addr:housenumber"],
     tags["addr:street"],
     tags["addr:suburb"],
     tags["addr:city"],
-    tags["addr:state"],
-  ].filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+    tags["addr:state"]
+  ].filter((item) => typeof item === "string" && item.trim().length > 0);
   return parts.length > 0 ? parts.join(", ") : "Address unavailable";
 }
-
-function osmFuelTypes(tags: UnknownMap): string[] {
+__name(osmAddress, "osmAddress");
+function osmFuelTypes(tags) {
   const fuels = [
     ["fuel:diesel", "Diesel"],
     ["fuel:petrol", "Petrol"],
@@ -399,82 +338,59 @@ function osmFuelTypes(tags: UnknownMap): string[] {
     ["fuel:octane_98", "Petrol 98"],
     ["fuel:electricity", "EV charging"],
     ["fuel:cng", "CNG"],
-    ["fuel:lpg", "LPG"],
+    ["fuel:lpg", "LPG"]
   ];
-  return fuels
-    .filter(([key]) => tags[key] === "yes")
-    .map(([, label]) => label);
+  return fuels.filter(([key]) => tags[key] === "yes").map(([, label]) => label);
 }
-
-function firstText(...values: unknown[]): string | null {
+__name(osmFuelTypes, "osmFuelTypes");
+function firstText(...values) {
   for (const value of values) {
     if (typeof value === "string" && value.trim()) return value.trim();
   }
   return null;
 }
-
-function escapeOverpassRegex(value: string): string {
+__name(firstText, "firstText");
+function escapeOverpassRegex(value) {
   return value.replace(/[\\"\[\]().*+?^${}|]/g, "\\$&");
 }
-
-function stationDistanceKm(station: UnknownMap, latitude: number, longitude: number): number {
+__name(escapeOverpassRegex, "escapeOverpassRegex");
+function stationDistanceKm(station, latitude, longitude) {
   const stationLat = typeof station.latitude === "number" ? station.latitude : null;
   const stationLng = typeof station.longitude === "number" ? station.longitude : null;
   if (stationLat === null || stationLng === null) return Number.POSITIVE_INFINITY;
-  const toRadians = (value: number) => (value * Math.PI) / 180;
+  const toRadians = /* @__PURE__ */ __name((value) => value * Math.PI / 180, "toRadians");
   const deltaLat = toRadians(stationLat - latitude);
   const deltaLng = toRadians(stationLng - longitude);
-  const a =
-    Math.sin(deltaLat / 2) ** 2 +
-    Math.cos(toRadians(latitude)) *
-      Math.cos(toRadians(stationLat)) *
-      Math.sin(deltaLng / 2) ** 2;
+  const a = Math.sin(deltaLat / 2) ** 2 + Math.cos(toRadians(latitude)) * Math.cos(toRadians(stationLat)) * Math.sin(deltaLng / 2) ** 2;
   return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
-
-type OsmPlaceId = {type: "node" | "way" | "relation"; id: number};
-
-function parseOsmPlaceId(value: string): OsmPlaceId | null {
+__name(stationDistanceKm, "stationDistanceKm");
+function parseOsmPlaceId(value) {
   const match = /^osm:(node|way|relation):(\d+)$/.exec(value);
   if (!match) return null;
-  return {type: match[1] as OsmPlaceId["type"], id: Number(match[2])};
+  return { type: match[1], id: Number(match[2]) };
 }
-
-async function readJson(request: Request): Promise<UnknownMap> {
+__name(parseOsmPlaceId, "parseOsmPlaceId");
+async function readJson(request) {
   const value = await request.json().catch(() => null);
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new PublicError(400, "Invalid request.");
   }
-  return value as UnknownMap;
+  return value;
 }
-
-function objectValue(value: unknown): UnknownMap {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as UnknownMap)
-    : {};
+__name(readJson, "readJson");
+function objectValue(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
-
-function finiteNumber(
-  value: unknown,
-  name: string,
-  minimum: number,
-  maximum: number,
-): number {
-  if (
-    typeof value !== "number" ||
-    !Number.isFinite(value) ||
-    value < minimum ||
-    value > maximum
-  ) {
+__name(objectValue, "objectValue");
+function finiteNumber(value, name, minimum, maximum) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < minimum || value > maximum) {
     throw new PublicError(400, "Invalid " + name + ".");
   }
   return value;
 }
-
-async function cachedJson(
-  url: URL, data: UnknownMap, cors: HeadersInit, ttlSeconds: number,
-  producer: () => Promise<UnknownMap>, ctx: ExecutionContext,
-): Promise<Response> {
+__name(finiteNumber, "finiteNumber");
+async function cachedJson(url, data, cors, ttlSeconds, producer, ctx) {
   const keyUrl = new URL(url);
   keyUrl.pathname = "/__cache/v2" + url.pathname;
   keyUrl.search = "";
@@ -497,21 +413,23 @@ async function cachedJson(
         return cachedResponse(body, cors, expires, "HIT-EDGE");
       }
     }
-  } catch {}
-
+  } catch {
+  }
   let pending = pendingRequests.get(key);
   if (!pending) {
     pending = (async () => {
-      const body = await producer(); // Errors are never cached as empty results.
+      const body = await producer();
       const empty = Array.isArray(body.stations) ? body.stations.length === 0 : !body.station;
-      const expires = Date.now() + Math.min(ttlSeconds, empty ? 60 : ttlSeconds) * 1000;
+      const expires = Date.now() + Math.min(ttlSeconds, empty ? 60 : ttlSeconds) * 1e3;
       const serialized = JSON.stringify(body);
       remember(key, serialized, expires);
       const response = cachedResponse(serialized, cors, expires, "MISS");
       try {
-        ctx.waitUntil(caches.default.put(cacheKey, response).catch(() => {}));
-      } catch {}
-      return {body: serialized, expires};
+        ctx.waitUntil(caches.default.put(cacheKey, response).catch(() => {
+        }));
+      } catch {
+      }
+      return { body: serialized, expires };
     })();
     pendingRequests.set(key, pending);
   }
@@ -522,77 +440,74 @@ async function cachedJson(
     if (pendingRequests.get(key) === pending) pendingRequests.delete(key);
   }
 }
-
-function remember(key: string, body: string, expires: number): void {
+__name(cachedJson, "cachedJson");
+function remember(key, body, expires) {
   memoryCache.delete(key);
-  memoryCache.set(key, {body, expires});
-  while (memoryCache.size > 256) memoryCache.delete(memoryCache.keys().next().value!);
+  memoryCache.set(key, { body, expires });
+  while (memoryCache.size > 256) memoryCache.delete(memoryCache.keys().next().value);
 }
-
-function cachedResponse(body: string, cors: HeadersInit, expires: number, status: string): Response {
-  return new Response(body, {headers: {
+__name(remember, "remember");
+function cachedResponse(body, cors, expires, status) {
+  return new Response(body, { headers: {
     ...cors,
     "Content-Type": "application/json; charset=utf-8",
-    "Cache-Control": "public, max-age=" + Math.max(0, Math.floor((expires - Date.now()) / 1000)),
+    "Cache-Control": "public, max-age=" + Math.max(0, Math.floor((expires - Date.now()) / 1e3)),
     "X-E0-Expires": String(expires),
-    "X-E0-Cache": status,
-  }});
+    "X-E0-Cache": status
+  } });
 }
-
-function json(
-  body: unknown,
-  status: number,
-  cors: HeadersInit,
-  cacheControl = "no-store",
-  cacheStatus?: "HIT" | "MISS",
-): Response {
+__name(cachedResponse, "cachedResponse");
+function json(body, status, cors, cacheControl = "no-store", cacheStatus) {
   return new Response(JSON.stringify(body), {
     status,
     headers: {
       "Content-Type": "application/json; charset=utf-8",
       "Cache-Control": cacheControl,
-      ...(cacheStatus ? {"X-E0-Cache": cacheStatus} : {}),
-      ...cors,
-    },
+      ...cacheStatus ? { "X-E0-Cache": cacheStatus } : {},
+      ...cors
+    }
   });
 }
-
-function stableCacheKey(data: UnknownMap): string {
+__name(json, "json");
+function stableCacheKey(data) {
   return encodeURIComponent(JSON.stringify(canonicalCacheValue(data)));
 }
-
-function canonicalCacheValue(value: unknown): unknown {
+__name(stableCacheKey, "stableCacheKey");
+function canonicalCacheValue(value) {
   if (Array.isArray(value)) return value.map(canonicalCacheValue);
   if (!value || typeof value !== "object") {
     return value;
   }
-  const source = value as UnknownMap;
-  const normalized: UnknownMap = {};
+  const source = value;
+  const normalized = {};
   for (const key of Object.keys(source).sort()) {
     const item = source[key];
     normalized[key] = canonicalCacheValue(item);
   }
   return normalized;
 }
-
-function corsHeaders(env: Env): Record<string, string> {
+__name(canonicalCacheValue, "canonicalCacheValue");
+function corsHeaders(env) {
   return {
     "Access-Control-Allow-Origin": env.ALLOWED_ORIGIN || "*",
     "Access-Control-Allow-Methods": "POST, OPTIONS, GET",
-    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Headers": "Content-Type"
   };
 }
-
-class PublicError extends Error {
-  readonly status: number;
-  readonly details?: UnknownMap;
-  constructor(
-    status: number,
-    message: string,
-    details?: UnknownMap,
-  ) {
+__name(corsHeaders, "corsHeaders");
+var PublicError = class extends Error {
+  constructor(status, message, details) {
     super(message);
     this.status = status;
     this.details = details;
   }
-}
+  status;
+  details;
+  static {
+    __name(this, "PublicError");
+  }
+};
+export {
+  index_default as default
+};
+//# sourceMappingURL=index.js.map
