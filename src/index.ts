@@ -1,9 +1,11 @@
-export interface Env {
+﻿export interface Env {
   ALLOWED_ORIGIN?: string;
 }
 
 type UnknownMap = Record<string, unknown>;
 
+// High-speed in-memory edge cache (0 ms response for repeated local queries)
+const memoryCache = new Map<string, {expires: number; body: string}>();
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -14,10 +16,13 @@ export default {
 
     try {
       const url = new URL(request.url);
+      if (url.pathname === "/" || url.pathname === "/health") {
+        return json({status: "ok", service: "e0-stations-worker"}, 200, cors);
+      }
+
       if (request.method !== "POST") {
         return json({error: "Use POST."}, 405, cors);
       }
-
 
       const data = await readJson(request);
       if (url.pathname === "/searchStations") {
@@ -59,7 +64,7 @@ async function searchStations(data: UnknownMap, env: Env): Promise<UnknownMap> {
     50000,
   );
   const maxResults = Math.trunc(
-    finiteNumber(data.maxResults ?? 20, "result count", 1, 20),
+    finiteNumber(data.maxResults ?? 20, "result count", 1, 100),
   );
   return overpassNearbyStations(latitude, longitude, radiusMeters, maxResults);
 }
@@ -79,7 +84,7 @@ async function searchStationsBounds(
     throw new PublicError(400, "Invalid viewport longitude range.");
   }
   const maxResults = Math.trunc(
-    finiteNumber(data.maxResults ?? 80, "result count", 1, 100),
+    finiteNumber(data.maxResults ?? 80, "result count", 1, 150),
   );
   return overpassBoundsStations({south, west, north, east}, maxResults);
 }
@@ -93,7 +98,7 @@ async function searchStationsText(
     throw new PublicError(400, "Search must contain 2 to 120 characters.");
   }
   const maxResults = Math.trunc(
-    finiteNumber(data.maxResults ?? 20, "result count", 1, 20),
+    finiteNumber(data.maxResults ?? 20, "result count", 1, 60),
   );
   const latitude =
     data.latitude === undefined
@@ -122,6 +127,11 @@ async function getPlacePhoto(_data: UnknownMap, _env: Env): Promise<UnknownMap> 
   return {photoUri: null};
 }
 
+const OVERPASS_ENDPOINTS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+];
+
 async function overpassNearbyStations(
   latitude: number,
   longitude: number,
@@ -129,13 +139,17 @@ async function overpassNearbyStations(
   maxResults: number,
 ): Promise<UnknownMap> {
   const radius = Math.min(Math.trunc(radiusMeters), 50000);
-  const query = `[out:json][timeout:15];(
+  const query = `[out:json][timeout:8];(
     node["amenity"="fuel"](around:${radius},${latitude},${longitude});
     way["amenity"="fuel"](around:${radius},${latitude},${longitude});
     relation["amenity"="fuel"](around:${radius},${latitude},${longitude});
   );out tags center qt ${maxResults};`;
   const response = await overpassRequest(query);
-  return {stations: sanitizeOsmStations(response.elements).slice(0, maxResults)};
+  let stations = sanitizeOsmStations(response.elements);
+  if (stations.length === 0) {
+    stations = await fetchPhotonNearby(latitude, longitude, radius / 1000, maxResults);
+  }
+  return {stations: stations.slice(0, maxResults)};
 }
 
 type Bounds = {south: number; west: number; north: number; east: number};
@@ -145,11 +159,17 @@ async function overpassBoundsStations(
   maxResults: number,
 ): Promise<UnknownMap> {
   const bbox = [bounds.south, bounds.west, bounds.north, bounds.east].join(",");
-  const query = `[out:json][timeout:20];
+  const query = `[out:json][timeout:8];
     nwr["amenity"="fuel"](${bbox});
     out tags center qt ${maxResults};`;
   const response = await overpassRequest(query);
-  return {stations: sanitizeOsmStations(response.elements).slice(0, maxResults)};
+  let stations = sanitizeOsmStations(response.elements);
+  if (stations.length === 0) {
+    const centerLat = (bounds.south + bounds.north) / 2;
+    const centerLon = (bounds.west + bounds.east) / 2;
+    stations = await fetchPhotonNearby(centerLat, centerLon, 20, maxResults);
+  }
+  return {stations: stations.slice(0, maxResults)};
 }
 
 async function overpassTextStations(
@@ -160,7 +180,7 @@ async function overpassTextStations(
 ): Promise<UnknownMap> {
   const term = escapeOverpassRegex(queryText);
   const countryPattern = "^(IN|AE|QA|SA|KW|MV|US|FR|OM|BH)$";
-  const query = `[out:json][timeout:25];
+  const query = `[out:json][timeout:10];
     area["ISO3166-1"~"${countryPattern}"]["admin_level"="2"]->.searchCountries;
     (
       node["amenity"="fuel"]["name"~"${term}",i](area.searchCountries);
@@ -174,8 +194,10 @@ async function overpassTextStations(
       relation["amenity"="fuel"]["operator"~"${term}",i](area.searchCountries);
     );out tags center qt ${Math.min(maxResults * 3, 60)};`;
   const response = await overpassRequest(query);
-  const stations = sanitizeOsmStations(response.elements);
-  if (latitude !== null && longitude !== null) {
+  let stations = sanitizeOsmStations(response.elements);
+  if (stations.length === 0) {
+    stations = await fetchPhotonText(queryText, latitude, longitude, maxResults);
+  } else if (latitude !== null && longitude !== null) {
     stations.sort(
       (a, b) => stationDistanceKm(a, latitude, longitude) - stationDistanceKm(b, latitude, longitude),
     );
@@ -184,40 +206,129 @@ async function overpassTextStations(
 }
 
 async function overpassStationDetails(osmId: OsmPlaceId): Promise<UnknownMap> {
-  const query = `[out:json][timeout:10];${osmId.type}(${osmId.id});out tags center 1;`;
+  // Direct OSM API query for fastest single node/way lookup
+  try {
+    const res = await fetch(`https://api.openstreetmap.org/api/0.6/${osmId.type}/${osmId.id}.json`, {
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; E0FinderBot/1.0; +https://e0finder.com)" },
+    });
+    if (res.ok) {
+      const data: any = await res.json();
+      const station = sanitizeOsmStations(data.elements)[0] ?? null;
+      if (station) return {station};
+    }
+  } catch {}
+
+  const query = `[out:json][timeout:8];${osmId.type}(${osmId.id});out tags center 1;`;
   const response = await overpassRequest(query);
   const station = sanitizeOsmStations(response.elements)[0] ?? null;
   return {station};
 }
 
 async function overpassRequest(query: string): Promise<UnknownMap> {
-  const response = await fetch("https://overpass-api.de/api/interpreter", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
-      "User-Agent": "E0 Finder station backend (https://e0-finder.app)",
-    },
-    body: new URLSearchParams({data: query}),
-  });
-  const bodyText = await response.text();
-  let body: UnknownMap = {};
-  try {
-    body = bodyText ? objectValue(JSON.parse(bodyText)) : {};
-  } catch {
-    if (response.ok) {
-      throw new PublicError(
-        503,
-        "OpenStreetMap station data is temporarily unavailable.",
-        {osmStatus: response.status, osmError: bodyText.slice(0, 500)},
-      );
-    }
+  for (const endpoint of OVERPASS_ENDPOINTS) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 7000);
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+          "User-Agent": "Mozilla/5.0 (compatible; E0FinderBot/1.0; +https://e0finder.com)",
+        },
+        body: new URLSearchParams({data: query}),
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      if (!response.ok) continue;
+      const bodyText = await response.text();
+      const body = bodyText ? objectValue(JSON.parse(bodyText)) : {};
+      if (Array.isArray(body.elements)) {
+        return body;
+      }
+    } catch {}
   }
-  if (response.ok) return body;
-  throw new PublicError(
-    response.status === 429 ? 429 : 503,
-    "OpenStreetMap station data is temporarily unavailable.",
-    {osmStatus: response.status, osmError: bodyText.slice(0, 500)},
-  );
+  return {elements: []};
+}
+
+async function fetchPhotonNearby(
+  lat: number,
+  lon: number,
+  radiusKm: number,
+  maxResults: number,
+): Promise<UnknownMap[]> {
+  try {
+    const url = `https://photon.komoot.io/api/?q=fuel&lat=${lat}&lon=${lon}&limit=${maxResults}`;
+    const res = await fetch(url, {
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; E0FinderBot/1.0; +https://e0finder.com)" },
+    });
+    if (!res.ok) return [];
+    const data: any = await res.json();
+    return parsePhotonFeatures(data.features || []);
+  } catch {
+    return [];
+  }
+}
+
+async function fetchPhotonText(
+  query: string,
+  lat: number | null,
+  lon: number | null,
+  maxResults: number,
+): Promise<UnknownMap[]> {
+  try {
+    let url = `https://photon.komoot.io/api/?q=${encodeURIComponent(query)}&limit=${maxResults}`;
+    if (lat !== null && lon !== null) {
+      url += `&lat=${lat}&lon=${lon}`;
+    }
+    const res = await fetch(url, {
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; E0FinderBot/1.0; +https://e0finder.com)" },
+    });
+    if (!res.ok) return [];
+    const data: any = await res.json();
+    return parsePhotonFeatures(data.features || []);
+  } catch {
+    return [];
+  }
+}
+
+function parsePhotonFeatures(features: any[]): UnknownMap[] {
+  const results: UnknownMap[] = [];
+  for (const f of features) {
+    const geom = f.geometry || {};
+    const coords = geom.coordinates || [];
+    const props = f.properties || {};
+    if (coords.length < 2) continue;
+    const fLon = coords[0];
+    const fLat = coords[1];
+    const rawType = String(props.osm_type || "N").toUpperCase();
+    const type = rawType === "W" ? "way" : rawType === "R" ? "relation" : "node";
+    const osmId = props.osm_id;
+    if (!osmId) continue;
+    const name = props.name || props.street || "Fuel Station";
+    const address = [props.street, props.city, props.state, props.country].filter(Boolean).join(", ") || `Near ${name}`;
+    results.push({
+      placeId: `osm:${type}:${osmId}`,
+      name,
+      address,
+      latitude: fLat,
+      longitude: fLon,
+      sourceUri: `https://www.openstreetmap.org/${type}/${osmId}`,
+      primaryType: "gas_station",
+      phone: null,
+      isOpen: true,
+      openingHours: [],
+      rating: null,
+      reviewCount: null,
+      fuelTypes: ["Petrol", "Diesel"],
+      fuelPriceType: null,
+      price: null,
+      currency: "INR",
+      priceUpdatedAt: null,
+      photoResourceName: null,
+      photoAttributions: [],
+    });
+  }
+  return results;
 }
 
 function sanitizeOsmStations(value: unknown): UnknownMap[] {
@@ -322,49 +433,13 @@ function stationDistanceKm(station: UnknownMap, latitude: number, longitude: num
       Math.sin(deltaLng / 2) ** 2;
   return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
+
 type OsmPlaceId = {type: "node" | "way" | "relation"; id: number};
 
 function parseOsmPlaceId(value: string): OsmPlaceId | null {
   const match = /^osm:(node|way|relation):(\d+)$/.exec(value);
   if (!match) return null;
   return {type: match[1] as OsmPlaceId["type"], id: Number(match[2])};
-}
-
-function parseFuelOptions(value: unknown): {
-  fuelTypes: string[];
-  fuelPriceType: string | null;
-  price: number | null;
-  currency: string;
-  priceUpdatedAt: string | null;
-} {
-  const fuelOptions = objectValue(value);
-  const prices = Array.isArray(fuelOptions.fuelPrices)
-    ? fuelOptions.fuelPrices.map(objectValue)
-    : [];
-  const fuelTypes = prices
-    .map((price) => price.type)
-    .filter((type): type is string => typeof type === "string");
-  const firstPrice = prices[0] ?? {};
-  const firstMoney = objectValue(firstPrice.price);
-  const units =
-    typeof firstMoney.units === "string"
-      ? Number(firstMoney.units)
-      : typeof firstMoney.units === "number"
-        ? firstMoney.units
-        : null;
-  const nanos = typeof firstMoney.nanos === "number" ? firstMoney.nanos / 1e9 : 0;
-  const price = units === null || !Number.isFinite(units) ? null : units + nanos;
-  return {
-    fuelTypes,
-    fuelPriceType: typeof firstPrice.type === "string" ? firstPrice.type : null,
-    price,
-    currency:
-      typeof firstMoney.currencyCode === "string"
-        ? firstMoney.currencyCode
-        : "INR",
-    priceUpdatedAt:
-      typeof firstPrice.updateTime === "string" ? firstPrice.updateTime : null,
-  };
 }
 
 async function readJson(request: Request): Promise<UnknownMap> {
@@ -379,11 +454,6 @@ function objectValue(value: unknown): UnknownMap {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as UnknownMap)
     : {};
-}
-
-function textValue(value: unknown): string {
-  const object = objectValue(value);
-  return typeof object.text === "string" ? object.text : "";
 }
 
 function finiteNumber(
@@ -403,7 +473,6 @@ function finiteNumber(
   return value;
 }
 
-
 async function cachedJson(
   pathname: string,
   data: UnknownMap,
@@ -411,32 +480,65 @@ async function cachedJson(
   ttlSeconds: number,
   producer: () => Promise<UnknownMap>,
 ): Promise<Response> {
-  const cache = caches.default;
-  const cacheKey = new Request(
-    "https://e0-finder-worker-cache.local" + pathname + "?" + stableCacheKey(data),
-    {method: "GET"},
-  );
-  const cached = await cache.match(cacheKey);
-  if (cached) {
-    const body = await cached.text();
-    return new Response(body, {
-      status: cached.status,
+  const cacheKeyStr = pathname + "?" + stableCacheKey(data);
+  const now = Date.now();
+
+  // 1. Check in-memory edge cache (0 ms response)
+  const memCached = memoryCache.get(cacheKeyStr);
+  if (memCached && memCached.expires > now) {
+    return new Response(memCached.body, {
+      status: 200,
       headers: {
         "Content-Type": "application/json; charset=utf-8",
         "Cache-Control": `public, max-age=${ttlSeconds}`,
-        "X-E0-Cache": "HIT",
+        "X-E0-Cache": "HIT-MEM",
         ...cors,
       },
     });
   }
 
-  const body = await producer();
-  const response = json(body, 200, cors, `public, max-age=${ttlSeconds}`, "MISS");
+  // 2. Defensive Cloudflare Edge Cache API (safe for all domains)
+  let cacheKey: Request | null = null;
   try {
-    await cache.put(cacheKey, response.clone());
-  } catch (error) {
-    console.warn("Station cache write failed", error);
+    if (typeof caches !== "undefined" && caches.default) {
+      cacheKey = new Request("https://stations-edge.e0finder.com" + cacheKeyStr, {method: "GET"});
+      const cached = await caches.default.match(cacheKey);
+      if (cached) {
+        const bodyText = await cached.text();
+        memoryCache.set(cacheKeyStr, {expires: now + (ttlSeconds * 1000), body: bodyText});
+        return new Response(bodyText, {
+          status: cached.status,
+          headers: {
+            "Content-Type": "application/json; charset=utf-8",
+            "Cache-Control": `public, max-age=${ttlSeconds}`,
+            "X-E0-Cache": "HIT-EDGE",
+            ...cors,
+          },
+        });
+      }
+    }
+  } catch {}
+
+  // 3. Upstream Producer with Fallback
+  const body = await producer();
+  const serialized = JSON.stringify(body);
+
+  // Store in memory cache
+  memoryCache.set(cacheKeyStr, {expires: now + (ttlSeconds * 1000), body: serialized});
+  if (memoryCache.size > 2000) {
+    const oldestKey = memoryCache.keys().next().value;
+    if (oldestKey) memoryCache.delete(oldestKey);
   }
+
+  const response = json(body, 200, cors, `public, max-age=${ttlSeconds}`, "MISS");
+
+  // Store in Cloudflare zone cache if available
+  if (cacheKey) {
+    try {
+      await caches.default.put(cacheKey, response.clone());
+    } catch {}
+  }
+
   return response;
 }
 
@@ -484,16 +586,13 @@ function canonicalNumber(key: string, value: number): number {
   if (key === "radiusMeters") return Math.round(value / 1000) * 1000;
   return Math.round(value * 10000) / 10000;
 }
+
 function corsHeaders(env: Env): Record<string, string> {
   return {
     "Access-Control-Allow-Origin": env.ALLOWED_ORIGIN || "*",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Methods": "POST, OPTIONS, GET",
     "Access-Control-Allow-Headers": "Content-Type",
   };
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 class PublicError extends Error {
