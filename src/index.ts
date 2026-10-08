@@ -1,4 +1,13 @@
-﻿export interface Env {
+﻿import {
+  type SupabaseEnv,
+  supabaseBounds,
+  supabaseConfigured,
+  supabaseNearby,
+  supabaseStation,
+  supabaseText,
+} from "./supabase.ts";
+
+export interface Env extends SupabaseEnv {
   ALLOWED_ORIGIN?: string;
 }
 
@@ -67,7 +76,11 @@ async function searchStations(data: UnknownMap, env: Env): Promise<UnknownMap> {
   const maxResults = Math.trunc(
     finiteNumber(data.maxResults ?? 20, "result count", 1, 100),
   );
-  return overpassNearbyStations(latitude, longitude, radiusMeters, maxResults);
+  return preferSupabase(
+    env,
+    () => supabaseNearby(env, latitude, longitude, radiusMeters, maxResults),
+    () => overpassNearbyStations(latitude, longitude, radiusMeters, maxResults),
+  );
 }
 
 async function searchStationsBounds(
@@ -87,7 +100,12 @@ async function searchStationsBounds(
   const maxResults = Math.trunc(
     finiteNumber(data.maxResults ?? 80, "result count", 1, 150),
   );
-  return overpassBoundsStations({south, west, north, east}, maxResults);
+  const bounds = {south, west, north, east};
+  return preferSupabase(
+    env,
+    () => supabaseBounds(env, bounds, maxResults),
+    () => overpassBoundsStations(bounds, maxResults),
+  );
 }
 
 async function searchStationsText(
@@ -109,7 +127,11 @@ async function searchStationsText(
     data.longitude === undefined
       ? null
       : finiteNumber(data.longitude, "longitude", -180, 180);
-  return overpassTextStations(query, latitude, longitude, maxResults);
+  return preferSupabase(
+    env,
+    () => supabaseText(env, query, latitude, longitude, maxResults),
+    () => overpassTextStations(query, latitude, longitude, maxResults),
+  );
 }
 
 async function getStationDetails(
@@ -118,10 +140,33 @@ async function getStationDetails(
 ): Promise<UnknownMap> {
   const rawPlaceId = typeof data.placeId === "string" ? data.placeId : "";
   const osmId = parseOsmPlaceId(rawPlaceId);
-  if (!osmId) {
-    throw new PublicError(400, "Invalid OpenStreetMap station ID.");
+  if (osmId) return overpassStationDetails(osmId);
+  if (!STATION_ID_PATTERN.test(rawPlaceId)) {
+    throw new PublicError(400, "Invalid station ID.");
   }
-  return overpassStationDetails(osmId);
+  if (!supabaseConfigured(env)) return {station: null};
+  return {station: await supabaseStation(env, rawPlaceId)};
+}
+
+// Same shape Cloud Functions accept for non-OSM station IDs.
+const STATION_ID_PATTERN = /^[A-Za-z0-9_-]{10,256}$/;
+
+// Serves crawled stations from Supabase; live OSM is only used when Supabase
+// is unconfigured, fails, or has no stations in the requested area.
+async function preferSupabase(
+  env: Env,
+  fromSupabase: () => Promise<UnknownMap[]>,
+  fromOsm: () => Promise<UnknownMap>,
+): Promise<UnknownMap> {
+  if (supabaseConfigured(env)) {
+    try {
+      const stations = await fromSupabase();
+      if (stations.length > 0) return {stations};
+    } catch (error) {
+      console.error(error);
+    }
+  }
+  return fromOsm();
 }
 
 async function getPlacePhoto(_data: UnknownMap, _env: Env): Promise<UnknownMap> {
@@ -476,7 +521,7 @@ async function cachedJson(
   producer: () => Promise<UnknownMap>, ctx: ExecutionContext,
 ): Promise<Response> {
   const keyUrl = new URL(url);
-  keyUrl.pathname = "/__cache/v2" + url.pathname;
+  keyUrl.pathname = "/__cache/v3" + url.pathname;
   keyUrl.search = "";
   keyUrl.searchParams.set("query", stableCacheKey(data));
   const key = keyUrl.toString();

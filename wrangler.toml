@@ -4,6 +4,9 @@ compatibility_date = "2026-08-14"
 
 [vars]
 ALLOWED_ORIGIN = "*"
+# Publishable key is safe to expose; Supabase RLS limits it to reads.
+SUPABASE_URL = "https://rwgikpgkmmzpbzwvuiix.supabase.co"
+SUPABASE_PUBLISHABLE_KEY = "sb_publishable_ClJF1aOlxtj7SQ4GiVfy2g_pzMfUDaZ"
 
 [[r2_buckets]]
 binding = "STATIONS_BUCKET"

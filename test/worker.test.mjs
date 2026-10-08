@@ -63,7 +63,7 @@ test('Overpass requests coordinates and hot queries skip upstream', async () => 
   const second = await request('searchStations', near);
   assert.equal(second.headers.get('X-E0-Cache'), 'HIT-MEM');
   assert.equal(calls, 1);
-  assert.ok(writes[0].startsWith('https://worker.example/__cache/v2/'));
+  assert.ok(writes[0].startsWith('https://worker.example/__cache/v3/'));
 });
 
 test('different radii, limits, and nearby coordinates have distinct cache keys', async () => {
@@ -185,4 +185,73 @@ test('all upstream attempts have bounded abort timers', async () => {
   });
   assert.equal((await request('searchStations', near)).status, 503);
   assert.deepEqual(budgets, [3000, 3000, 2000]);
+});
+
+const supabaseEnv = {
+  ALLOWED_ORIGIN: '*',
+  SUPABASE_URL: 'https://db.example',
+  SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_test',
+};
+function supabaseRequest(path, body) {
+  return worker.fetch(new Request('https://worker.example/' + path, {
+    method: 'POST', body: JSON.stringify(body),
+    headers: {'Content-Type': 'application/json'},
+  }), supabaseEnv, {waitUntil(promise) { pending.push(promise); }});
+}
+function row(id, latitude, longitude, extra = {}) {
+  return {id, name: 'Pump ' + id, brand: 'IndianOil', address: null, area: 'Park Street',
+    city: 'Kolkata', state: 'West Bengal', latitude, longitude, rating: '4.2',
+    review_count: 10, timing: 'Open 24 Hours', phone: null, ...extra};
+}
+
+test('Supabase stations are served nearest first without calling Overpass', async () => {
+  const urls = [];
+  globalThis.fetch = async (url, init) => {
+    urls.push(String(url));
+    assert.equal(init.headers.apikey, 'sb_publishable_test');
+    return json([
+      row('gplaces-ChIJfarStation01', 22.05, 88.05),
+      row('gplaces-ChIJnearStation1', 22.001, 88.001),
+      row('gplaces-ChIJoutsideRadius', 22.5, 88.5),
+    ]);
+  };
+  const response = await supabaseRequest('searchStations', {...near, radiusMeters: 10000});
+  const {stations} = await response.json();
+  assert.equal(urls.length, 1);
+  assert.match(urls[0], /^https:\/\/db\.example\/rest\/v1\/stations\?/);
+  assert.match(urls[0], /is_active=eq\.true/);
+  assert.deepEqual(stations.map((s) => s.placeId), ['ChIJnearStation1', 'ChIJfarStation01']);
+  assert.equal(stations[0].rating, 4.2);
+  assert.equal(stations[0].address, 'Park Street, Kolkata, West Bengal');
+  assert.deepEqual(stations[0].openingHours, ['Open 24 Hours']);
+  assert.match(stations[0].sourceUri, /query_place_id=ChIJnearStation1/);
+});
+
+test('Supabase failures fall back to OpenStreetMap', async () => {
+  globalThis.fetch = async (url) => {
+    if (String(url).startsWith('https://db.example')) return json({message: 'down'}, 500);
+    return json({elements: [osm(7)]});
+  };
+  const {stations} = await (await supabaseRequest('searchStations', near)).json();
+  assert.deepEqual(stations.map((s) => s.placeId), ['osm:node:7']);
+});
+
+test('station details resolve bare Google place IDs from Supabase', async () => {
+  globalThis.fetch = async (url) => {
+    assert.match(decodeURIComponent(String(url)), /id=in\.\("ChIJdetail000001","gplaces-ChIJdetail000001"\)/);
+    return json([row('gplaces-ChIJdetail000001', 22, 88)]);
+  };
+  const {station} = await (await supabaseRequest('getStationDetails', {placeId: 'ChIJdetail000001'})).json();
+  assert.equal(station.placeId, 'ChIJdetail000001');
+});
+
+test('text search strips PostgREST filter syntax from the query', async () => {
+  globalThis.fetch = async (url) => {
+    const decoded = decodeURIComponent(String(url));
+    assert.match(decoded, /name\.ilike\.\*indian oil\*/);
+    assert.doesNotMatch(decoded, /\(\)\)|,id\./);
+    return json([row('gplaces-ChIJtextStation1', 22, 88)]);
+  };
+  const {stations} = await (await supabaseRequest('searchStationsText', {query: 'indian,oil)'})).json();
+  assert.equal(stations.length, 1);
 });
