@@ -8,6 +8,11 @@ ALLOWED_ORIGIN = "*"
 SUPABASE_URL = "https://rwgikpgkmmzpbzwvuiix.supabase.co"
 SUPABASE_PUBLISHABLE_KEY = "sb_publishable_ClJF1aOlxtj7SQ4GiVfy2g_pzMfUDaZ"
 
+# Secrets (never put these in [vars]); set once with:
+#   npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY   # OSM write-through + coverage ledger
+#   npx wrangler secret put GOOGLE_PLACES_API_KEY       # server key, Places API (New) enabled
+# Without them the worker still serves Supabase + OSM; it just won't save or call Google.
+
 [[r2_buckets]]
 binding = "STATIONS_BUCKET"
 bucket_name = "e0-finder"

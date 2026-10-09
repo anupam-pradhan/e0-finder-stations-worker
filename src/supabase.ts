@@ -22,6 +22,9 @@ type StationRow = {
   review_count: number | null;
   timing: string | null;
   phone: string | null;
+  is_coco: boolean | null;
+  fuel_grade: string | null;
+  amenities: string[] | null;
 };
 
 const TIMEOUT_MS = 4000;
@@ -29,7 +32,25 @@ const TIMEOUT_MS = 4000;
 const MAX_CANDIDATES = 1000;
 const GOOGLE_ID_PREFIX = "gplaces-";
 const COLUMNS =
-  "id,name,brand,address,area,city,state,latitude,longitude,rating,review_count,timing,phone";
+  "id,name,brand,address,area,city,state,latitude,longitude,rating,review_count,timing,phone," +
+  "is_coco,fuel_grade,amenities";
+
+// Same tags and patterns as the app's lib/core/utils/fuel_types.dart.
+const FUEL_PATTERNS: [string, RegExp][] = [
+  ["XP100", /\bxp\s?100\b/i],
+  ["poWer100", /\bpower\s?100\b/i],
+  ["Speed 97", /\bspeed\s?97\b/i],
+  ["Speed 100", /\bspeed\s?100\b/i],
+  ["E85", /\be85\b/i],
+  ["E100", /\be100\b/i],
+  ["CNG", /\bcng\b/i],
+  ["EV charging", /\bev\b.*charg|charging station/i],
+];
+
+export function fuelTypesFromText(fuelGrade: string | null, amenities: string[] | null): string[] {
+  const text = [fuelGrade ?? "", ...(amenities ?? [])].join(" | ");
+  return FUEL_PATTERNS.filter(([, pattern]) => pattern.test(text)).map(([tag]) => tag);
+}
 
 export function supabaseConfigured(env: SupabaseEnv): boolean {
   return Boolean(env.SUPABASE_URL && env.SUPABASE_PUBLISHABLE_KEY);
@@ -174,7 +195,8 @@ function toStation(row: StationRow): Record<string, unknown> {
     openingHours: row.timing ? [row.timing] : [],
     rating: Number.isFinite(rating) ? rating : null,
     reviewCount: row.review_count,
-    fuelTypes: [],
+    fuelTypes: fuelTypesFromText(row.fuel_grade, row.amenities),
+    isCoco: row.is_coco === true,
     fuelPriceType: null,
     price: null,
     currency: "INR",

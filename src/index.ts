@@ -6,8 +6,21 @@
   supabaseStation,
   supabaseText,
 } from "./supabase.ts";
+import {
+  type CoverageEnv,
+  isFresh,
+  liveGooglePoints,
+  persistCoverage,
+  readTile,
+  tileKey,
+} from "./coverage.ts";
+import {
+  type GooglePlacesEnv,
+  googleNearbyStations,
+  googlePlacesConfigured,
+} from "./google_places.ts";
 
-export interface Env extends SupabaseEnv {
+export interface Env extends SupabaseEnv, GooglePlacesEnv, CoverageEnv {
   ALLOWED_ORIGIN?: string;
 }
 
@@ -46,6 +59,14 @@ export default {
       }
       if (url.pathname === "/getStationDetails") {
         return await cachedJson(url, data, cors, 86400, () => getStationDetails(data, env), ctx);
+      }
+      if (url.pathname === "/fillGap") {
+        // Coverage gap: live Google + OSM now, OSM persisted in the background.
+        return json(await fillGap(data, env, ctx), 200, cors);
+      }
+      if (url.pathname === "/googleNearby") {
+        // Live, never cached (Google terms: only place IDs may be stored).
+        return json(await googleNearby(data, env), 200, cors);
       }
       if (url.pathname === "/getPlacePhoto") {
         return json(await getPlacePhoto(data, env), 200, cors);
@@ -167,6 +188,84 @@ async function preferSupabase(
     }
   }
   return fromOsm();
+}
+
+async function fillGap(
+  data: UnknownMap,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<UnknownMap> {
+  const latitude = finiteNumber(data.latitude, "latitude", -90, 90);
+  const longitude = finiteNumber(data.longitude, "longitude", -180, 180);
+  const radiusMeters = finiteNumber(data.radiusMeters ?? 5000, "search radius", 500, 50000);
+  const now = Date.now();
+  const tile = tileKey(latitude, longitude);
+
+  // Already filled this area → no Google/Overpass call at all. OSM pumps from
+  // that fill are already in Supabase; only stored Google ids+coords remain.
+  const ledger = await readTile(env, tile).catch(() => null);
+  if (ledger && isFresh(ledger, now)) {
+    return {
+      stations: liveGooglePoints(ledger, now).map((point) => ({
+        placeId: point.id,
+        name: "Fuel station",
+        address: "Tap for directions",
+        latitude: point.lat,
+        longitude: point.lng,
+        sourceUri:
+          `https://www.google.com/maps/search/?api=1&query=${point.lat},${point.lng}` +
+          `&query_place_id=${encodeURIComponent(point.id)}`,
+        primaryType: "gas_station",
+        fuelTypes: [],
+        currency: "INR",
+      })),
+      tile,
+      cached: true,
+    };
+  }
+
+  const [google, osm] = await Promise.all([
+    googlePlacesConfigured(env)
+      ? googleNearbyStations(env, latitude, longitude, radiusMeters, 20).catch((error) => {
+          console.error(error);
+          return [] as UnknownMap[];
+        })
+      : Promise.resolve([] as UnknownMap[]),
+    overpassNearbyStations(latitude, longitude, radiusMeters, 60)
+      .then((result) => (Array.isArray(result.stations) ? (result.stations as UnknownMap[]) : []))
+      .catch(() => [] as UnknownMap[]),
+  ]);
+
+  // Prefer Google's live names; add OSM pumps not already within ~60 m of one.
+  const merged = [
+    ...google,
+    ...osm.filter((o) =>
+      !google.some((g) =>
+        stationDistanceKm(o, Number(g.latitude), Number(g.longitude)) < 0.06,
+      ),
+    ),
+  ];
+
+  try {
+    ctx.waitUntil(
+      persistCoverage(env, tile, osm, google, now).catch((error) => console.error(error)),
+    );
+  } catch {}
+  return {stations: merged, tile, cached: false};
+}
+
+async function googleNearby(data: UnknownMap, env: Env): Promise<UnknownMap> {
+  const latitude = finiteNumber(data.latitude, "latitude", -90, 90);
+  const longitude = finiteNumber(data.longitude, "longitude", -180, 180);
+  const radiusMeters = finiteNumber(data.radiusMeters ?? 5000, "search radius", 500, 50000);
+  const maxResults = Math.trunc(finiteNumber(data.maxResults ?? 20, "result count", 1, 20));
+  if (!googlePlacesConfigured(env)) return {stations: []};
+  try {
+    return {stations: await googleNearbyStations(env, latitude, longitude, radiusMeters, maxResults)};
+  } catch (error) {
+    console.error(error);
+    return {stations: []};
+  }
 }
 
 async function getPlacePhoto(_data: UnknownMap, _env: Env): Promise<UnknownMap> {

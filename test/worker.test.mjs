@@ -255,3 +255,144 @@ test('text search strips PostgREST filter syntax from the query', async () => {
   const {stations} = await (await supabaseRequest('searchStationsText', {query: 'indian,oil)'})).json();
   assert.equal(stations.length, 1);
 });
+
+test('Supabase stations expose COCO and fuel grades', async () => {
+  globalThis.fetch = async () => json([
+    row('gplaces-ChIJcocoXp100001', 22.001, 88.001, {
+      is_coco: true,
+      fuel_grade: 'XP100 (0% Ethanol)',
+      amenities: ['XP100 Dispenser', 'EV Fast Charging', 'CNG Available'],
+    }),
+    row('gplaces-ChIJregularPump1', 22.002, 88.002, {
+      is_coco: false,
+      fuel_grade: 'Regular Petrol (E20 - No E0 Available)',
+      amenities: ['Regular Petrol', 'UPI / Card'],
+    }),
+  ]);
+  const {stations} = await (await supabaseRequest('searchStations', near)).json();
+  assert.equal(stations[0].isCoco, true);
+  assert.deepEqual(stations[0].fuelTypes, ['XP100', 'CNG', 'EV charging']);
+  assert.equal(stations[1].isCoco, false);
+  assert.deepEqual(stations[1].fuelTypes, []);
+});
+
+function googleRequest(body, env) {
+  return worker.fetch(new Request('https://worker.example/googleNearby', {
+    method: 'POST', body: JSON.stringify(body),
+    headers: {'Content-Type': 'application/json'},
+  }), env, {waitUntil(promise) { pending.push(promise); }});
+}
+
+test('googleNearby returns nothing (and calls nothing) without a key', async () => {
+  globalThis.fetch = () => { throw Error('must not call Google without a key'); };
+  const {stations} = await (await googleRequest(
+    {latitude: 21.63, longitude: 87.53, radiusMeters: 5000}, {ALLOWED_ORIGIN: '*'})).json();
+  assert.deepEqual(stations, []);
+});
+
+test('googleNearby uses the cheap field mask and maps live results without caching', async () => {
+  let calls = 0;
+  globalThis.fetch = async (url, init) => {
+    calls++;
+    assert.equal(String(url), 'https://places.googleapis.com/v1/places:searchNearby');
+    assert.equal(init.headers['X-Goog-Api-Key'], 'test-key');
+    assert.equal(init.headers['X-Goog-FieldMask'],
+      'places.id,places.displayName,places.formattedAddress,places.location');
+    const body = JSON.parse(init.body);
+    assert.deepEqual(body.includedTypes, ['gas_station']);
+    return json({places: [{
+      id: 'ChIJliveGoogle001',
+      displayName: {text: 'HP Petrol Pump Digha'},
+      formattedAddress: 'Digha, West Bengal',
+      location: {latitude: 21.627, longitude: 87.529},
+    }]});
+  };
+  const env = {ALLOWED_ORIGIN: '*', GOOGLE_PLACES_API_KEY: 'test-key'};
+  const req = {latitude: 21.63, longitude: 87.53, radiusMeters: 5000};
+  const first = await (await googleRequest(req, env)).json();
+  const second = await (await googleRequest(req, env)).json();
+  assert.equal(first.stations[0].placeId, 'ChIJliveGoogle001');
+  assert.equal(first.stations[0].name, 'HP Petrol Pump Digha');
+  assert.match(first.stations[0].sourceUri, /query_place_id=ChIJliveGoogle001/);
+  assert.equal(second.stations.length, 1);
+  assert.equal(calls, 2, 'Google results must not be served from cache');
+  assert.equal(writes.length, 0, 'Google results must not be written to the edge cache');
+});
+
+function fillRequest(body, env) {
+  return worker.fetch(new Request('https://worker.example/fillGap', {
+    method: 'POST', body: JSON.stringify(body),
+    headers: {'Content-Type': 'application/json'},
+  }), env, {waitUntil(promise) { pending.push(promise); }});
+}
+const fillEnv = {
+  ALLOWED_ORIGIN: '*',
+  SUPABASE_URL: 'https://db.example',
+  SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_test',
+  SUPABASE_SERVICE_ROLE_KEY: 'service-secret',
+  GOOGLE_PLACES_API_KEY: 'google-key',
+};
+
+test('fillGap on an already-filled area makes no Google or Overpass call', async () => {
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    if (String(url).includes('/coverage_tiles?tile=eq.')) {
+      return json([{
+        tile: '216:875', checked_at: new Date().toISOString(), osm_count: 3,
+        google_place_ids: ['ChIJstored0001'],
+        google_points: [{id: 'ChIJstored0001', lat: 21.62, lng: 87.52}],
+        google_expires_at: new Date(Date.now() + 86400000).toISOString(),
+      }]);
+    }
+    throw Error('unexpected upstream call: ' + url);
+  };
+  const body = await (await fillRequest({latitude: 21.63, longitude: 87.53, radiusMeters: 5000}, fillEnv)).json();
+  assert.equal(body.cached, true);
+  assert.deepEqual(body.stations.map((s) => s.placeId), ['ChIJstored0001']);
+  assert.equal(calls.length, 1, 'only the ledger read');
+});
+
+test('fillGap on a new gap shows Google+OSM live and persists OSM + ledger', async () => {
+  const posts = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    if (u.includes('/coverage_tiles?tile=eq.')) return json([]);
+    if (u.startsWith('https://places.googleapis.com')) {
+      return json({places: [{id: 'ChIJgoogle0001', displayName: {text: 'HP Digha'},
+        formattedAddress: 'Digha', location: {latitude: 21.6270, longitude: 87.5290}}]});
+    }
+    if (u.includes('overpass')) {
+      return json({elements: [
+        {type: 'node', id: 11, lat: 21.6271, lon: 87.5291, tags: {amenity: 'fuel', name: 'HP dup'}},
+        {type: 'node', id: 22, lat: 21.6400, lon: 87.5400, tags: {amenity: 'fuel', name: 'IndianOil New'}},
+      ]});
+    }
+    if (u.startsWith('https://db.example/rest/v1/coverage_tiles?google_expires_at=lt.')) {
+      assert.equal(init.method, 'PATCH');
+      posts.push({u, body: JSON.parse(init.body)});
+      return json(null);
+    }
+    if (u.startsWith('https://db.example/rest/v1/rpc/ingest_osm_stations') ||
+        u.startsWith('https://db.example/rest/v1/coverage_tiles?on_conflict')) {
+      assert.equal(init.headers.Authorization, 'Bearer service-secret');
+      posts.push({u, body: JSON.parse(init.body)});
+      return json(1);
+    }
+    throw Error('unexpected call: ' + u);
+  };
+  const body = await (await fillRequest({latitude: 21.63, longitude: 87.53, radiusMeters: 5000}, fillEnv)).json();
+  await Promise.all(pending);
+  assert.equal(body.cached, false);
+  // Google live + only the OSM pump that isn't the same forecourt.
+  assert.deepEqual(body.stations.map((s) => s.placeId), ['ChIJgoogle0001', 'osm:node:22']);
+  const ingest = posts.find((p) => p.u.includes('ingest_osm_stations'));
+  assert.deepEqual(ingest.body.stations.map((s) => s.id), ['osm:node:11', 'osm:node:22']);
+  assert.equal(ingest.body.stations[1].brand, 'IndianOil');
+  const purge = posts.find((p) => p.u.includes('google_expires_at=lt.'));
+  assert.deepEqual(purge.body, {google_points: [], google_expires_at: null});
+  const ledger = posts.find((p) => p.u.includes('coverage_tiles?on_conflict'));
+  assert.deepEqual(ledger.body.google_place_ids, ['ChIJgoogle0001']);
+  assert.ok(ledger.body.google_expires_at, 'Google coordinates must carry a 30-day expiry');
+  assert.equal(JSON.stringify(ledger.body).includes('HP Digha'), false, 'Google names are never stored');
+});
