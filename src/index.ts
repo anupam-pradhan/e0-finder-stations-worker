@@ -13,6 +13,7 @@ import {
   persistCoverage,
   readTile,
   tileKey,
+  inferBrand,
 } from "./coverage.ts";
 import {type HpclEnv, crawlBatch as crawlHpclBatch} from "./hpcl.ts";
 import {
@@ -91,6 +92,15 @@ export default {
           200,
           cors,
         );
+      }
+      if (url.pathname === "/admin/ingestOsm") {
+        // One-time gap crawl: named OpenStreetMap pumps (ODbL, storable) are
+        // added through ingest_osm_stations, which skips any pump within
+        // 60 m of an existing one. Admin only.
+        if (!env.ADMIN_SECRET || request.headers.get("X-Admin-Secret") !== env.ADMIN_SECRET) {
+          return json({error: "Forbidden."}, 403, cors);
+        }
+        return json(await ingestOsmBatch(data, env), 200, cors);
       }
       if (url.pathname === "/fillGap") {
         // Coverage gap: live Google + OSM now, OSM persisted in the background.
@@ -810,4 +820,33 @@ class PublicError extends Error {
     this.status = status;
     this.details = details;
   }
+}
+
+
+/** Validates an admin OSM batch (max 500) and forwards it to the ingest RPC. */
+async function ingestOsmBatch(data: Record<string, unknown>, env: Env): Promise<{received: number; inserted: number}> {
+  const service = env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!env.SUPABASE_URL || !service) throw new Error("Supabase is not configured.");
+  const raw = Array.isArray(data.stations) ? data.stations.slice(0, 500) : [];
+  const stations = raw.flatMap((item: unknown) => {
+    if (!item || typeof item !== "object") return [];
+    const s = item as Record<string, unknown>;
+    const id = typeof s.id === "string" && /^osm:(node|way|relation):[0-9]{1,20}$/.test(s.id) ? s.id : null;
+    const lat = typeof s.latitude === "number" ? s.latitude : NaN;
+    const lng = typeof s.longitude === "number" ? s.longitude : NaN;
+    const name = typeof s.name === "string" ? s.name.trim().slice(0, 120) : "";
+    const brand = typeof s.brand === "string" ? s.brand.trim().slice(0, 60) : "";
+    if (!id || !(name || brand) || !(lat >= 6 && lat <= 38) || !(lng >= 68 && lng <= 98)) return [];
+    const address = typeof s.address === "string" ? s.address.trim().slice(0, 240) : "";
+    return [{id, name: name || brand, brand: brand || inferBrand(name), address, latitude: lat, longitude: lng}];
+  });
+  if (stations.length === 0) return {received: raw.length, inserted: 0};
+  const response = await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/ingest_osm_stations`, {
+    method: "POST",
+    headers: {apikey: service, Authorization: `Bearer ${service}`, "Content-Type": "application/json"},
+    body: JSON.stringify({stations}),
+    signal: AbortSignal.timeout(25000),
+  });
+  if (!response.ok) throw new Error(`ingest failed: ${response.status} ${await response.text()}`);
+  return {received: raw.length, inserted: Number(await response.json()) || 0};
 }
