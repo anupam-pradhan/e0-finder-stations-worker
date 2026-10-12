@@ -166,6 +166,8 @@ export function nameFromSlug(slug: string, locality?: string): string {
 
 // ─── Fetch helpers ────────────────────────────────────────────────────────────
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 async function get(url: string, headers: Record<string, string> = {}): Promise<Response> {
   return fetch(url, {
     headers: {"User-Agent": USER_AGENT, ...headers},
@@ -173,9 +175,16 @@ async function get(url: string, headers: Record<string, string> = {}): Promise<R
   });
 }
 
-async function fetchText(url: string): Promise<string> {
+async function fetchText(url: string, attempt = 0): Promise<string> {
   const res = await get(url);
-  if (!res.ok) throw new Error(`${url} → ${res.status}`);
+  if (!res.ok) {
+    // Sitemap/outlet fetches share HPCL's burst window; wait it out once.
+    if (attempt === 0) {
+      await sleep(BACKOFF_MS);
+      return fetchText(url, 1);
+    }
+    throw new Error(`${url} → ${res.status}`);
+  }
   if (url.endsWith(".gz")) {
     const stream = res.body!.pipeThrough(new DecompressionStream("gzip"));
     return new Response(stream).text();
@@ -190,7 +199,6 @@ export async function fetchPriceCards(outletId: string): Promise<FuelCard[]> {
   return parsePriceFragment(await res.text());
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // ─── Index (R2) ───────────────────────────────────────────────────────────────
 
