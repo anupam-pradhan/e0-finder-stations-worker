@@ -14,6 +14,7 @@ import {
   readTile,
   tileKey,
 } from "./coverage.ts";
+import {type HpclEnv, crawlBatch as crawlHpclBatch} from "./hpcl.ts";
 import {
   type GooglePlacesEnv,
   googleNearbyStations,
@@ -21,8 +22,10 @@ import {
   googleTextSearchStations,
 } from "./google_places.ts";
 
-export interface Env extends SupabaseEnv, GooglePlacesEnv, CoverageEnv {
+export interface Env extends SupabaseEnv, GooglePlacesEnv, CoverageEnv, HpclEnv {
   ALLOWED_ORIGIN?: string;
+  /** Protects manual crawl triggers (`wrangler secret put ADMIN_SECRET`). */
+  ADMIN_SECRET?: string;
 }
 
 type UnknownMap = Record<string, unknown>;
@@ -31,7 +34,18 @@ type UnknownMap = Record<string, unknown>;
 const memoryCache = new Map<string, {expires: number; body: string}>();
 const pendingRequests = new Map<string, Promise<{expires: number; body: string}>>();
 
+const HPCL_BATCH_PER_RUN = 350;
+
 export default {
+  /** Cron: refresh a rotating batch of HPCL outlets (see wrangler.toml). */
+  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(
+      crawlHpclBatch(env, HPCL_BATCH_PER_RUN)
+        .then((stats) => console.log("HPCL crawl", JSON.stringify(stats)))
+        .catch((error) => console.error("HPCL crawl failed", error)),
+    );
+  },
+
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const cors = corsHeaders(env);
     if (request.method === "OPTIONS") {
@@ -60,6 +74,14 @@ export default {
       }
       if (url.pathname === "/getStationDetails") {
         return await cachedJson(url, data, cors, 86400, () => getStationDetails(data, env), ctx);
+      }
+      if (url.pathname === "/admin/crawlHpcl") {
+        // Manual trigger for the HPCL crawl; same work as the cron.
+        if (!env.ADMIN_SECRET || request.headers.get("X-Admin-Secret") !== env.ADMIN_SECRET) {
+          return json({error: "Forbidden."}, 403, cors);
+        }
+        const limit = Math.trunc(finiteNumber(data.limit ?? 200, "limit", 1, 1000));
+        return json(await crawlHpclBatch(env, limit), 200, cors);
       }
       if (url.pathname === "/fillGap") {
         // Coverage gap: live Google + OSM now, OSM persisted in the background.
