@@ -28,7 +28,9 @@ const USER_AGENT = "Mozilla/5.0 (compatible; E0FinderBot/1.0; +https://e0finder.
 const INDEX_KEY = "hpcl/outlets.json";
 const INDEX_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 8000;
-const DELAY_MS = 150;
+// HPCL throttles bursts of ~50 requests; ~1 req/s stays well under that.
+const DELAY_MS = 1000;
+const BACKOFF_MS = 8000;
 const MATCH_RADIUS_M = 60;
 
 export const FUEL_GRADE_POWER100 = "poWer100 (low ethanol, up to 4.5%)";
@@ -331,10 +333,17 @@ export type CrawlStats = {
 };
 
 /** Checks the least-recently-checked `limit` outlets and merges results. */
-export async function crawlBatch(env: HpclEnv, limit: number, now = Date.now()): Promise<CrawlStats> {
+export async function crawlBatch(
+  env: HpclEnv,
+  limit: number,
+  now = Date.now(),
+  onlyIds?: string[],
+): Promise<CrawlStats> {
   const index = await loadIndex(env, now);
   const stats: CrawlStats = {indexed: index.outlets.length, checked: 0, power100Found: 0, upserted: 0, errors: 0};
-  const batch = [...index.outlets].sort((a, b) => a.lastChecked - b.lastChecked).slice(0, Math.max(0, limit));
+  const batch = onlyIds
+    ? index.outlets.filter((o) => onlyIds.includes(o.id))
+    : [...index.outlets].sort((a, b) => a.lastChecked - b.lastChecked).slice(0, Math.max(0, limit));
 
   for (const outlet of batch) {
     try {
@@ -362,6 +371,10 @@ export async function crawlBatch(env: HpclEnv, limit: number, now = Date.now()):
     } catch (error) {
       stats.errors++;
       console.error(`HPCL outlet ${outlet.id}: ${error}`);
+      // Throttled or flaky upstream: back off, and leave lastChecked so the
+      // outlet is retried first next run.
+      await sleep(BACKOFF_MS);
+      continue;
     }
     outlet.lastChecked = now;
     await sleep(DELAY_MS);
