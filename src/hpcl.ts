@@ -69,7 +69,13 @@ export type HpclOutlet = {
   stationId?: string;
 };
 
-export type HpclIndex = {builtAt: number; outlets: HpclOutlet[]};
+export type HpclIndex = {
+  builtAt: number;
+  outlets: HpclOutlet[];
+  /** City sitemaps still to be fetched; indexing is spread over runs so it
+   *  never exceeds HPCL's request window. */
+  pendingSitemaps: string[];
+};
 
 export type FuelCard = {name: string; price: number | null; inStock: boolean};
 
@@ -202,32 +208,49 @@ export async function fetchPriceCards(outletId: string): Promise<FuelCard[]> {
 
 // ─── Index (R2) ───────────────────────────────────────────────────────────────
 
+/** One request: the sitemap index. City sitemaps are fetched over later runs. */
 export async function buildIndex(): Promise<HpclIndex> {
   const sitemaps = parseSitemapIndex(await fetchText(`${BASE}/sitemap.xml`)).filter(isPriorityCity);
-  const outlets: HpclOutlet[] = [];
-  for (const url of sitemaps) {
+  return {builtAt: Date.now(), outlets: [], pendingSitemaps: sitemaps};
+}
+
+/** Fetches up to `limit` pending city sitemaps and merges their outlets. */
+export async function indexPendingSitemaps(index: HpclIndex, limit: number): Promise<number> {
+  const known = new Map(index.outlets.map((o) => [o.id, o]));
+  let added = 0;
+  const batch = index.pendingSitemaps.slice(0, Math.max(0, limit));
+  for (const url of batch) {
     const meta = citySitemapMeta(url);
-    if (!meta) continue;
     try {
-      outlets.push(...parseCitySitemap(await fetchText(url), meta.state, meta.city));
+      if (meta) {
+        for (const outlet of parseCitySitemap(await fetchText(url), meta.state, meta.city)) {
+          if (!known.has(outlet.id)) {
+            known.set(outlet.id, outlet);
+            index.outlets.push(outlet);
+            added++;
+          }
+        }
+      }
+      index.pendingSitemaps = index.pendingSitemaps.filter((u) => u !== url);
     } catch (error) {
       console.error(`HPCL sitemap failed ${url}: ${error}`);
+      // Leave it pending; retried next run after the window resets.
+      break;
     }
     await sleep(DELAY_MS);
   }
-  return {builtAt: Date.now(), outlets};
+  return added;
 }
 
 export async function loadIndex(env: HpclEnv, now: number, forceRebuild = false): Promise<HpclIndex> {
   const object = await env.STATIONS_BUCKET.get(INDEX_KEY);
   if (object) {
     const index = (await object.json()) as HpclIndex;
-    if (!forceRebuild && now - index.builtAt < INDEX_MAX_AGE_MS && index.outlets.length > 0) return index;
-    // Rebuild but keep what we learned about each outlet.
+    index.pendingSitemaps ??= [];
+    if (!forceRebuild && now - index.builtAt < INDEX_MAX_AGE_MS) return index;
+    // Weekly refresh: queue every priority sitemap again, keep known outlets.
     const fresh = await buildIndex();
-    const known = new Map(index.outlets.map((o) => [o.id, o]));
-    fresh.outlets = fresh.outlets.map((o) => ({...(known.get(o.id) ?? {}), ...o, lastChecked: known.get(o.id)?.lastChecked ?? 0, power100: known.get(o.id)?.power100 ?? false}));
-    return fresh;
+    return {builtAt: fresh.builtAt, outlets: index.outlets, pendingSitemaps: fresh.pendingSitemaps};
   }
   return buildIndex();
 }
@@ -338,6 +361,7 @@ export type CrawlStats = {
   power100Found: number;
   upserted: number;
   errors: number;
+  pendingSitemaps: number;
 };
 
 /** Checks the least-recently-checked `limit` outlets and merges results. */
@@ -349,7 +373,17 @@ export async function crawlBatch(
   forceRebuild = false,
 ): Promise<CrawlStats> {
   const index = await loadIndex(env, now, forceRebuild);
-  const stats: CrawlStats = {indexed: index.outlets.length, checked: 0, power100Found: 0, upserted: 0, errors: 0};
+  const stats: CrawlStats = {indexed: index.outlets.length, checked: 0, power100Found: 0, upserted: 0, errors: 0, pendingSitemaps: 0};
+  // Finish indexing first: each run spends its request budget on sitemaps
+  // until every priority city is in, then on outlet price checks.
+  if (index.pendingSitemaps.length > 0 && !onlyIds) {
+    await indexPendingSitemaps(index, limit);
+    stats.indexed = index.outlets.length;
+    stats.pendingSitemaps = index.pendingSitemaps.length;
+    await saveIndex(env, index);
+    return stats;
+  }
+  stats.pendingSitemaps = index.pendingSitemaps.length;
   const batch = onlyIds
     ? index.outlets.filter((o) => onlyIds.includes(o.id))
     : [...index.outlets].sort((a, b) => a.lastChecked - b.lastChecked).slice(0, Math.max(0, limit));

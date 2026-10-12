@@ -88,3 +88,24 @@ test('upsert inserts hpcl-<id> when no pump is nearby', async () => {
   assert.equal(body.price, 168);
   assert.match(body.name, /Central S S Petrol Pump/);
 });
+
+test('indexing is incremental and resumes after a throttled sitemap', async () => {
+  const {indexPendingSitemaps} = await import('../src/hpcl.ts?inc=1');
+  let calls = 0;
+  globalThis.fetch = async (url) => {
+    calls++;
+    const u = String(url);
+    if (u.includes('/delhi/new_delhi.xml.gz')) {
+      return new Response(new Blob([new TextEncoder().encode(
+        '<urlset><url><loc>https://petrolpump.hpretail.in/hindustan-petroleum-corporation-limited-x-new-delhi-97359/Home</loc></url></urlset>')]).stream().pipeThrough(new CompressionStream('gzip')));
+    }
+    return new Response('throttled', {status: 429});
+  };
+  const index = {builtAt: 1, outlets: [], pendingSitemaps: [
+    'https://petrolpump.hpretail.in/files/enterprise/sitemap/google/96681/delhi/new_delhi.xml.gz',
+    'https://petrolpump.hpretail.in/files/enterprise/sitemap/google/96681/maharashtra/mumbai.xml.gz']};
+  const added = await indexPendingSitemaps(index, 10);
+  assert.equal(added, 1);
+  assert.equal(index.outlets[0].id, '97359');
+  assert.deepEqual(index.pendingSitemaps, ['https://petrolpump.hpretail.in/files/enterprise/sitemap/google/96681/maharashtra/mumbai.xml.gz'], 'throttled sitemap stays pending');
+});
