@@ -279,8 +279,9 @@ async function nearbyExisting(env: HpclEnv, latitude: number, longitude: number)
   return Array.isArray(rows) ? rows : [];
 }
 
+/** Exact check time, so the app can truthfully say "Verified today, 8:15 AM". */
 function today(): string {
-  return new Date().toISOString().slice(0, 10);
+  return new Date().toISOString();
 }
 
 /** Upgrades a nearby existing pump, or inserts `hpcl-<id>`. Returns the station id. */
