@@ -396,3 +396,31 @@ test('fillGap on a new gap shows Google+OSM live and persists OSM + ledger', asy
   assert.ok(ledger.body.google_expires_at, 'Google coordinates must carry a 30-day expiry');
   assert.equal(JSON.stringify(ledger.body).includes('HP Digha'), false, 'Google names are never stored');
 });
+
+test('googleTextSearch returns live results and persists only ids/coords', async () => {
+  const posts = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    if (u === 'https://places.googleapis.com/v1/places:searchText') {
+      const body = JSON.parse(init.body);
+      assert.equal(body.includedType, 'gas_station');
+      assert.match(body.textQuery, /digha/i);
+      return json({places: [{id: 'ChIJtextDigha001', displayName: {text: 'HP Digha'},
+        formattedAddress: 'Digha', location: {latitude: 21.627, longitude: 87.529}}]});
+    }
+    if (u.includes('/coverage_tiles')) { posts.push({u, body: init.body ? JSON.parse(init.body) : null}); return json(null); }
+    throw Error('unexpected: ' + u);
+  };
+  const env = {ALLOWED_ORIGIN: '*', SUPABASE_URL: 'https://db.example',
+    SUPABASE_PUBLISHABLE_KEY: 'pk', SUPABASE_SERVICE_ROLE_KEY: 'service-secret', GOOGLE_PLACES_API_KEY: 'k'};
+  const res = await worker.fetch(new Request('https://worker.example/googleTextSearch', {
+    method: 'POST', body: JSON.stringify({query: 'Digha', latitude: 21.63, longitude: 87.53}),
+    headers: {'Content-Type': 'application/json'}}), env, {waitUntil(p) { pending.push(p); }});
+  const body = await res.json();
+  await Promise.all(pending);
+  assert.deepEqual(body.stations.map((s) => s.placeId), ['ChIJtextDigha001']);
+  const ledger = posts.find((p) => p.u.includes('on_conflict'));
+  assert.deepEqual(ledger.body.google_place_ids, ['ChIJtextDigha001']);
+  assert.equal(JSON.stringify(ledger.body).includes('HP Digha'), false);
+  assert.equal(writes.length, 0, 'never edge-cached');
+});

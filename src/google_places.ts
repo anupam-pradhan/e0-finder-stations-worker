@@ -11,6 +11,7 @@ export interface GooglePlacesEnv {
 }
 
 const NEARBY_URL = "https://places.googleapis.com/v1/places:searchNearby";
+const TEXT_URL = "https://places.googleapis.com/v1/places:searchText";
 const FIELD_MASK =
   "places.id,places.displayName,places.formattedAddress,places.location";
 const TIMEOUT_MS = 4000;
@@ -96,4 +97,45 @@ function toStation(place: GooglePlace): Record<string, unknown> {
     photoResourceName: null,
     photoAttributions: [],
   };
+}
+
+/** Text search ("HP pump Digha") — same cheap field mask, never stored. */
+export async function googleTextSearchStations(
+  env: GooglePlacesEnv,
+  query: string,
+  latitude: number | null,
+  longitude: number | null,
+  maxResults: number,
+): Promise<Record<string, unknown>[]> {
+  if (!env.GOOGLE_PLACES_API_KEY) return [];
+  const body: Record<string, unknown> = {
+    textQuery: `${query} petrol pump`,
+    includedType: "gas_station",
+    pageSize: Math.min(Math.max(Math.trunc(maxResults), 1), 20),
+  };
+  if (latitude !== null && longitude !== null) {
+    body.locationBias = {circle: {center: {latitude, longitude}, radius: 50000}};
+  }
+  const response = await fetch(TEXT_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Goog-Api-Key": env.GOOGLE_PLACES_API_KEY,
+      "X-Goog-FieldMask": FIELD_MASK,
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    throw new Error(`Places text search failed: ${response.status} ${await response.text()}`);
+  }
+  const data = (await response.json()) as { places?: GooglePlace[] };
+  return (data.places ?? [])
+    .filter(
+      (place) =>
+        place.id &&
+        typeof place.location?.latitude === "number" &&
+        typeof place.location?.longitude === "number",
+    )
+    .map((place) => toStation(place));
 }

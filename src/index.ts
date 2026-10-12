@@ -1,4 +1,4 @@
-﻿import {
+import {
   type SupabaseEnv,
   supabaseBounds,
   supabaseConfigured,
@@ -18,6 +18,7 @@ import {
   type GooglePlacesEnv,
   googleNearbyStations,
   googlePlacesConfigured,
+  googleTextSearchStations,
 } from "./google_places.ts";
 
 export interface Env extends SupabaseEnv, GooglePlacesEnv, CoverageEnv {
@@ -63,6 +64,10 @@ export default {
       if (url.pathname === "/fillGap") {
         // Coverage gap: live Google + OSM now, OSM persisted in the background.
         return json(await fillGap(data, env, ctx), 200, cors);
+      }
+      if (url.pathname === "/googleTextSearch") {
+        // Live, never edge-cached (Google terms: only place IDs may be stored).
+        return json(await googleTextSearch(data, env, ctx), 200, cors);
       }
       if (url.pathname === "/googleNearby") {
         // Live, never cached (Google terms: only place IDs may be stored).
@@ -252,6 +257,41 @@ async function fillGap(
     );
   } catch {}
   return {stations: merged, tile, cached: false};
+}
+
+async function googleTextSearch(
+  data: UnknownMap,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<UnknownMap> {
+  const query = typeof data.query === "string" ? data.query.trim() : "";
+  if (query.length < 2 || query.length > 120) {
+    throw new PublicError(400, "Search must contain 2 to 120 characters.");
+  }
+  const latitude = data.latitude === undefined ? null : finiteNumber(data.latitude, "latitude", -90, 90);
+  const longitude = data.longitude === undefined ? null : finiteNumber(data.longitude, "longitude", -180, 180);
+  const maxResults = Math.trunc(finiteNumber(data.maxResults ?? 10, "result count", 1, 20));
+  if (!googlePlacesConfigured(env)) return {stations: []};
+  try {
+    const stations = await googleTextSearchStations(env, query, latitude, longitude, maxResults);
+    // Remember place IDs + coordinates (30 days) per area so the catalogue
+    // keeps growing from what people search for.
+    const byTile = new Map<string, UnknownMap[]>();
+    for (const station of stations) {
+      const tile = tileKey(Number(station.latitude), Number(station.longitude));
+      byTile.set(tile, [...(byTile.get(tile) ?? []), station]);
+    }
+    const now = Date.now();
+    for (const [tile, group] of byTile) {
+      try {
+        ctx.waitUntil(persistCoverage(env, tile, [], group, now).catch((e) => console.error(e)));
+      } catch {}
+    }
+    return {stations};
+  } catch (error) {
+    console.error(error);
+    return {stations: []};
+  }
 }
 
 async function googleNearby(data: UnknownMap, env: Env): Promise<UnknownMap> {
