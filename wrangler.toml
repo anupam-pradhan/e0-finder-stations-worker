@@ -17,8 +17,8 @@ SUPABASE_PUBLISHABLE_KEY = "sb_publishable_ClJF1aOlxtj7SQ4GiVfy2g_pzMfUDaZ"
 binding = "STATIONS_BUCKET"
 bucket_name = "e0-finder"
 
-# HPCL poWer100 refresh: a rotating batch of outlets every 2 hours, so every
-# priority-city outlet is re-checked within ~2 days. Manual run:
+# HPCL poWer100 refresh: 40 outlets every 15 minutes (HPCL throttles bursts
+# above ~50), so every priority-city outlet is re-checked daily. Manual run:
 #   curl -X POST <worker>/admin/crawlHpcl -H "X-Admin-Secret: ..." -d '{"limit":200}'
 [triggers]
-crons = ["15 */2 * * *"]
+crons = ["*/15 * * * *"]

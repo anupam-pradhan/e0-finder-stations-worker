@@ -210,11 +210,11 @@ export async function buildIndex(): Promise<HpclIndex> {
   return {builtAt: Date.now(), outlets};
 }
 
-export async function loadIndex(env: HpclEnv, now: number): Promise<HpclIndex> {
+export async function loadIndex(env: HpclEnv, now: number, forceRebuild = false): Promise<HpclIndex> {
   const object = await env.STATIONS_BUCKET.get(INDEX_KEY);
   if (object) {
     const index = (await object.json()) as HpclIndex;
-    if (now - index.builtAt < INDEX_MAX_AGE_MS && index.outlets.length > 0) return index;
+    if (!forceRebuild && now - index.builtAt < INDEX_MAX_AGE_MS && index.outlets.length > 0) return index;
     // Rebuild but keep what we learned about each outlet.
     const fresh = await buildIndex();
     const known = new Map(index.outlets.map((o) => [o.id, o]));
@@ -338,8 +338,9 @@ export async function crawlBatch(
   limit: number,
   now = Date.now(),
   onlyIds?: string[],
+  forceRebuild = false,
 ): Promise<CrawlStats> {
-  const index = await loadIndex(env, now);
+  const index = await loadIndex(env, now, forceRebuild);
   const stats: CrawlStats = {indexed: index.outlets.length, checked: 0, power100Found: 0, upserted: 0, errors: 0};
   const batch = onlyIds
     ? index.outlets.filter((o) => onlyIds.includes(o.id))

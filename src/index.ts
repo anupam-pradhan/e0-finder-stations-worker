@@ -34,8 +34,9 @@ type UnknownMap = Record<string, unknown>;
 const memoryCache = new Map<string, {expires: number; body: string}>();
 const pendingRequests = new Map<string, Promise<{expires: number; body: string}>>();
 
-// ~1 req/s → ~5 min per run; 12 runs/day covers all priority outlets daily.
-const HPCL_BATCH_PER_RUN = 300;
+// HPCL throttles after ~50 requests in a window, so: 40 outlets every 15 min
+// (~3,800/day) — every priority-city outlet is re-checked daily.
+const HPCL_BATCH_PER_RUN = 40;
 
 export default {
   /** Cron: refresh a rotating batch of HPCL outlets (see wrangler.toml). */
@@ -85,7 +86,11 @@ export default {
         const onlyIds = Array.isArray(data.outletIds)
           ? data.outletIds.filter((id: unknown): id is string => typeof id === "string")
           : undefined;
-        return json(await crawlHpclBatch(env, limit, Date.now(), onlyIds), 200, cors);
+        return json(
+          await crawlHpclBatch(env, limit, Date.now(), onlyIds, data.rebuild === true),
+          200,
+          cors,
+        );
       }
       if (url.pathname === "/fillGap") {
         // Coverage gap: live Google + OSM now, OSM persisted in the background.
