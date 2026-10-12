@@ -100,7 +100,8 @@ export async function supabaseText(
   const term = query.replace(/[,()*%:."\\]/g, " ").trim();
   if (!term) return [];
   const pattern = encodeURIComponent(`*${term}*`);
-  const filter = `or=(name.ilike.${pattern},brand.ilike.${pattern},city.ilike.${pattern},area.ilike.${pattern})`;
+  // Town names (e.g. "Digha") usually live in the address, not the city.
+  const filter = `or=(name.ilike.${pattern},brand.ilike.${pattern},city.ilike.${pattern},area.ilike.${pattern},address.ilike.${pattern})`;
   const rows = await select(env, `${filter}&limit=${MAX_CANDIDATES}`);
   const sorted =
     latitude !== null && longitude !== null
